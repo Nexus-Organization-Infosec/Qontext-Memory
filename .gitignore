@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# memory files written by the agent
+*.qx
+
+# environments and editors
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+
+# models and other large local artefacts — never commit these
+*.gguf
+*.bin
+*.safetensors
+*.tar.gz
