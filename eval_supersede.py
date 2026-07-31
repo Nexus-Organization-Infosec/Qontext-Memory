@@ -13,8 +13,8 @@ Three measurements:
   safety        hand-picked pairs that share vocabulary but are different
                 facts. Both must survive. Any loss here is a bug, not a
                 trade-off.
-  invariant     every pair of the distinct facts within conversations A, B
-                and C, cross-multiplied. None of them corrects another, so zero
+  invariant     every pair of the 79 distinct facts in conversations A, B and
+                C, cross-multiplied. None of them corrects another, so zero
                 collapses are allowed. This is the real guarantee — the
                 hand-picked list only covers what I thought to write down.
 """
@@ -26,8 +26,10 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "qontext-run"))
 
-import conversations as cv  # noqa: E402
+import bench_test as bt   # noqa: E402
+import stress_conv as sc  # noqa: E402
 
 # (stale statement, corrected statement, what must be recalled, what must not)
 CORRECTIONS = [
@@ -161,7 +163,7 @@ def score_invariant(mod):
     """
     QM = mod.QuipuMemory
     collapses, pairs, total = [], 0, 0
-    for conv in (cv.CONV_A, cv.CONV_B, cv.CONV_C):
+    for conv in (bt.CONV_A, bt.CONV_B, sc.CONV_C):
         knots = []
         for speaker, text in conv:
             if speaker != "user":

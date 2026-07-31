@@ -69,6 +69,31 @@ class TestExtraction(unittest.TestCase):
         knots = extract("I live in Antwerp\nMy manager is Priya")
         self.assertEqual(len(knots), 2, knots)
 
+    def test_never_splits_inside_a_quotation(self):
+        """Prose puts full stops inside quotes; splitting there strands the
+        payload on the far side of the cut."""
+        for knot in extract('"Go home. Now," she said, and the demo is on Friday.'):
+            quotes = knot.count('"')
+            self.assertEqual(quotes % 2, 0, "unbalanced quote in %r" % knot)
+
+    def test_long_sentence_keeps_the_payload(self):
+        """Design rule 2 under a long sentence: fit by clause, never slice."""
+        long_one = ("She had spent the entire afternoon walking the length of "
+                    "the old canal without speaking to anyone at all, and the "
+                    "sprint demo is on Friday at 10:00")
+        knots = extract(long_one)
+        self.assertTrue(any("Friday" in k for k in knots), knots)
+        for knot in knots:
+            self.assertLessEqual(len(knot), MAX_ENTRY_CHARS)
+
+    def test_bare_dialogue_gets_a_speaker(self):
+        # the line has to be a fact first — a weekday makes it one
+        knots = extract('"I will meet you at the shrine on Friday."',
+                        subject="Sabine")
+        self.assertTrue(knots, "nothing extracted")
+        self.assertTrue(knots[0].startswith("Sabine says"), knots)
+        self.assertIn("Friday", knots[0])
+
     def test_is_pure(self):
         text = "People call me Marta."
         self.assertEqual(extract(text), extract(text))
@@ -202,6 +227,71 @@ class TestPack(unittest.TestCase):
     def test_irrelevant_query_does_not_dump_everything(self):
         packed = self.mem.pack("What is the airspeed of an unladen swallow?", 300)
         self.assertLessEqual(len(packed.split("\n")), 2)
+
+    def test_reserved_slice_survives_an_uninformative_query(self):
+        """With PACK_RESERVE set, standing facts ride along even when the
+        query shares no words with anything — the roleplay case."""
+        import qontext_memory as qm
+        mem = QontextMemory()
+        mem.observe("user", "People call me Marta and I am allergic to shellfish.")
+        mem.observe("user", "The tram was busy and the sky was grey.")
+        previous = qm.PACK_RESERVE
+        try:
+            qm.PACK_RESERVE = 0.5
+            packed = mem.pack("I lean over and kiss her cheek", 300).lower()
+            self.assertIn("marta", packed)
+            for budget in (0, 40, 120, 300):
+                self.assertLessEqual(
+                    len(mem.pack("something unrelated entirely", budget)), budget)
+        finally:
+            qm.PACK_RESERVE = previous
+
+    def test_reserved_slice_does_not_duplicate(self):
+        import qontext_memory as qm
+        mem = QontextMemory()
+        for text in ("People call me Marta.", "I work as a nurse.",
+                     "The demo is on Friday at 10:00."):
+            mem.observe("user", text)
+        previous = qm.PACK_RESERVE
+        try:
+            qm.PACK_RESERVE = 0.5
+            lines = [l for l in mem.pack("What is the user's job?", 300).split("\n") if l]
+            self.assertEqual(len(lines), len(set(lines)))
+        finally:
+            qm.PACK_RESERVE = previous
+
+    def test_facts_about_other_people_do_not_outrank_the_user(self):
+        """A long conversation is full of near-misses. When the query names
+        the user, a knot about somebody else answers a different question."""
+        mem = QontextMemory()
+        mem.observe("user", "I work as a nurse, mostly night shifts.")
+        mem.observe("user", "We track tasks in Trello.")
+        mem.observe("user", "My dog is called Bikkel.")
+        for other in ("Fenna works as a teacher.", "Sem works as a teacher.",
+                      "Kasper tracks their tasks in Jira.",
+                      "Ruben tracks their tasks in Basecamp.",
+                      "My neighbour's dog is called Rex."):
+            mem.observe("user", other)
+        for question, expected in (("What is the user's own job?", "nurse"),
+                                   ("Where does the user track tasks?", "trello"),
+                                   ("What is the user's own dog called?", "bikkel")):
+            lines = [l for l in mem.pack(question, 300).split("\n") if l]
+            self.assertTrue(lines, question)
+            self.assertIn(expected, lines[0].lower(),
+                          "%r ranked %r first" % (question, lines[0]))
+
+    def test_no_specific_occupations_in_the_synonym_table(self):
+        """An occupation is payload, not a relation word. 'teacher' once sat
+        in the job group — from tuning against a conversation whose user was
+        a teacher — and any knot about anyone teaching outranked the answer."""
+        import qontext_memory as qm
+        for group in ("job", "role", "work", "profession"):
+            words = qm.SYNONYMS.get(qm._stem(group), set())
+            for occupation in ("teacher", "teaching", "engineer", "nurse",
+                               "baker", "doctor"):
+                self.assertNotIn(qm._stem(occupation), words,
+                                 "%r is payload, not a synonym of %r"
+                                 % (occupation, group))
 
     def test_explain_marks_packed_entries(self):
         rows = self.mem.explain("What is the user's job?", 300)
@@ -450,6 +540,37 @@ class TestSupersessionSafety(unittest.TestCase):
         self.assertTrue(any("Tomas" in e for e in mem.entries()),
                         mem.entries())
 
+    def test_importance_ranks_identity_over_furniture(self):
+        import qontext_memory as qm
+        identity = qm._importance("People call the user Marta")
+        allergy = qm._importance("the user is allergic to shellfish")
+        preference = qm._importance("the user prefers bullet points")
+        commitment = qm._importance("the demo is on Friday at 10:00")
+        tool = qm._importance("the user's editor is Neovim")
+        self.assertGreater(identity, preference)
+        self.assertGreater(allergy, commitment)
+        self.assertGreater(preference, tool)
+        for value in (identity, allergy, preference, commitment, tool):
+            self.assertGreaterEqual(value, 1.0)
+            self.assertLessEqual(value, 5.0)
+
+    def test_flagged_facts_outrank_their_category(self):
+        import qontext_memory as qm
+        plain = qm._importance("the meeting is at 10:00")
+        flagged = qm._importance("remember the meeting is at 10:00")
+        self.assertGreater(flagged, plain)
+
+    def test_eviction_keeps_the_important_fact(self):
+        """Under pressure, identity survives and scenery does not."""
+        mem = QontextMemory(max_entries=4)
+        mem.observe("user", "People call me Marta and I am allergic to shellfish.")
+        for i in range(40):
+            mem.observe("user", "The %s tram was busy and the cafe on street %d was loud."
+                        % (("red", "blue", "green")[i % 3], i))
+        blob = " ".join(mem.entries()).lower()
+        self.assertIn("marta", blob)
+        self.assertIn("shellfish", blob)
+
     def test_rejects_bad_max_entries(self):
         for bad in (0, -1, "ten", None, 2.5):
             with self.assertRaises(ValueError):
@@ -608,6 +729,16 @@ class TestDunders(unittest.TestCase):
 
     def test_iter(self):
         self.assertEqual(list(self.mem), self.mem.entries())
+
+    def test_empty_memory_is_falsy_and_that_is_documented(self):
+        """__len__ makes an empty memory falsy. That is standard Python, and
+        it bit benchmark.py: `if live:` skipped a memory that simply had no
+        knots yet. Callers must use `is not None`, and this test exists so
+        the behaviour is deliberate rather than discovered."""
+        self.assertFalse(bool(QontextMemory()))
+        mem = QontextMemory()
+        mem.observe("user", "People call me Marta.")
+        self.assertTrue(bool(mem))
 
     def test_repr(self):
         self.assertIn("QontextMemory", repr(self.mem))

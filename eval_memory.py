@@ -23,13 +23,15 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "qontext-run"))
 
-import conversations as cv  # noqa: E402
+import bench_test as bt  # noqa: E402  (conversations A and B)
+import stress_conv as sc  # noqa: E402  (conversation C)
 
 SUITES = [
-    ("A  (tuned-on)", cv.CONV_A, cv.QUESTIONS_A),
-    ("B  (held-out)", cv.CONV_B, cv.QUESTIONS_B),
-    ("C  (stress)  ", cv.CONV_C, cv.QUESTIONS_C),
+    ("A  (tuned-on)", bt.CONV_A, bt.QUESTIONS_A),
+    ("B  (held-out)", bt.CONV_B, bt.QUESTIONS_B),
+    ("C  (stress)  ", sc.CONV_C, sc.QUESTIONS_C),
 ]
 BUDGETS = (150, 300, 800)
 

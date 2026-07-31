@@ -53,8 +53,35 @@ MAX_ENTRY_CHARS = 120       # a knot longer than this is not a knot
 MIN_SENTENCE = 8            # shorter than this carries nothing
 SUPERSEDE_SIMILARITY = 0.6  # word overlap above which a knot restates another
 RELEVANCE_FLOOR = 0.5       # keep knots scoring this fraction of the best match
+FLOOR_MAX_KNOTS = 200       # above this the floor is dropped (see pack)
 LENGTH_NORM = 0.5           # how strongly to prefer shorter knots (0 = off)
+# Importance decides what survives eviction, not what gets retrieved. Letting
+# it sway ranking was measured: at 0.5 it bought one fact on a roleplay log
+# and cost three on the stress conversation, because an important knot is not
+# the same thing as a relevant one. Left as a knob, off by default.
+IMPORTANCE_RANK = 0.0       # how strongly importance sways ranking (0 = off)
+# Share of the pack filled by importance instead of by the query. Zero by
+# default: in assistant chat the query is informative and reserving space
+# costs recall. In roleplay it is the opposite — measured on real logs, the
+# facts a reply drew on were carried 5.4% of the time at 1200 characters with
+# no reserve, and 9.3% with half the pack reserved. Set 0.5 for roleplay.
+# A woven association counts this much of a real word match. The weave hook
+# (qontext_weave.py) is wired but unproven: on 30k tokens of personal text it
+# made retrieval slightly worse, and only became harmless when filtered so
+# hard that almost nothing came through. It needs orders of magnitude more
+# text before it earns its place. Pass weave= only if you have that.
+ASSOCIATION_WEIGHT = 0.5
+PACK_RESERVE = 0.0
 REFERENCE_LENGTH = 40       # knots under this length are not penalised
+# When the query names its subject ("where does the user track tasks"), a knot
+# about somebody else is not a weak match — it answers a different question.
+# Measured on a long conversation seeded with facts about other people, four
+# knots tied exactly and recency handed the pack to the decoys. This damps
+# knots that mention no first-party subject at all — including those where a
+# chained possessive moves the subject elsewhere: "the user's neighbour's dog"
+# is the neighbour's dog, however many times it says "user".
+SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
+_CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 
 # --------------------------------------------------------------------------
 # stemming (defined first: the tables below are normalised through it)
@@ -318,9 +345,13 @@ _RAW_SYNONYMS = {
     "from": "live living based hometown",
     "timezone": "tz utc gmt cet cest est pst zone timezone based hours",
     # occupation
+    # No specific occupations here. "teacher" and "engineer" were once in this
+    # group, from tuning against a conversation whose user was a teacher — and
+    # the effect was that any knot about *anyone* with that job outranked the
+    # answer. An occupation is payload, not a relation word.
     "job": "work works working role title position profession occupation career "
-           "employed employer company teaching teacher engineer lead freelance",
-    "role": "job work works title position lead engineer responsibility",
+           "employed employer company freelance",
+    "role": "job work works title position responsibility",
     "work": "job role employed employer company profession",
     "employer": "work works employed company firm business agency startup",
     "company": "employer work works employed firm business startup agency",
@@ -487,6 +518,75 @@ for _topic, _words_ in _TOPIC_GROUPS.items():
         TOPIC_VOCAB[_stem_] = _topic
 
 
+# --------------------------------------------------------------------------
+# IMPORTANCE — how much it would cost to forget a knot.
+#
+# Nobody rates these by hand and no model is called: the weight is computed
+# from signals the memory already has. What kind of fact it is (an identity
+# outranks a piece of scenery), whether it carries a concrete payload,
+# whether the speaker flagged it, and how often it has been restated or
+# retrieved since.
+#
+# Scored 1-5, the same scale the .qx weave format uses, where 5 means losing
+# it would break continuity.
+# --------------------------------------------------------------------------
+
+WEIGHT_5 = _stems(
+    # who someone is, and who they are to each other: the facts every later
+    # turn depends on
+    """name named call called nickname alias born birthday age
+       wife husband partner spouse fiance married daughter son child children
+       brother sister sibling mother father parents family cousin
+       allergic allergy intolerant vegetarian vegan diet dietary medication
+       disability accessibility autistic adhd dyslexic""")
+
+WEIGHT_4 = _stems(
+    # standing instructions and stable circumstances
+    """prefer prefers preference like likes dislike hate rather always never
+       avoid format bullet style tone brief concise verbose units metric
+       live lives living based situated located reside hometown timezone
+       job role work works employer company profession studies student
+       manager supervisor boss client competitor team colleague
+       dog cat pet rabbit""")
+
+WEIGHT_3 = _stems(
+    # commitments: true until a date passes, then they are history
+    """meeting standup demo retro kickoff sync deadline due ship ships
+       deliver submit invoice budget appointment schedule scheduled
+       flight trip travel conference hotel visit holiday""")
+
+WEIGHT_2 = _stems(
+    # the working furniture — replaceable, but worth knowing
+    """repo repository project codename product editor database deploy
+       server tool tools stack laptop phone car gpu cpu vram
+       book band music gym hobby""")
+
+# The user saying "remember this" outranks any category guess.
+FLAGGED = _stems("""remember forget important critical crucial promise
+                    promised must essential vital""")
+
+IMPORTANCE_TIERS = ((WEIGHT_5, 5.0), (WEIGHT_4, 4.0),
+                    (WEIGHT_3, 3.0), (WEIGHT_2, 2.0))
+
+
+def _importance(text, reinforcements=0, hits=0):
+    """1-5. What it would cost to forget this knot."""
+    stems = {_stem(w) for w in re.findall(r"[\w-]+", text.lower())}
+    weight = 1.0
+    for vocabulary, tier in IMPORTANCE_TIERS:
+        if stems & vocabulary:
+            weight = tier
+            break
+    if not _has_payload(text):
+        weight -= 0.5          # a category word with nothing concrete in it
+    if stems & FLAGGED:
+        weight += 1.0          # said to be worth remembering
+    # restated or retrieved facts earn their place; the curve is flat on
+    # purpose, so a fact mentioned twice does not outrank an identity
+    weight += min(1.0, 0.4 * math.log1p(reinforcements + hits))
+    return max(1.0, min(5.0, weight))
+
+
 def _frame(text):
     """The topic frame of a knot: what it is about, minus what can change."""
     frame = set()
@@ -533,9 +633,47 @@ def _identifiers(frame):
     return frozenset(t for t in frame if t.startswith("ID:"))
 
 
-# Sentence boundaries: ., !, ?, : and newlines. Not a linguistics engine —
-# it only has to avoid welding two facts into one knot.
+# Sentence boundaries: ., !, ?, : and newlines — but never inside a quotation.
+# Prose puts sentence punctuation inside quotes constantly ("Go home. Now,"
+# she said), and splitting there produces knots that begin or end mid-quote
+# with the payload on the other side of the cut. Measured on roleplay logs,
+# 17% of all knots were broken this way.
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?:])\s+|\n+")
+_QUOTES = {'"': '"', "\u201c": "\u201d", "\u2018": "\u2019", "'": "'"}
+
+
+def _quote_depth(text):
+    """Where each character sits relative to quotation marks."""
+    depth, inside, opener = [], False, None
+    for char in text:
+        if not inside and char in ('"', "\u201c", "\u2018"):
+            inside, opener = True, char
+            depth.append(1)
+            continue
+        if inside and char == _QUOTES.get(opener, '"'):
+            inside = False
+            depth.append(1)
+            continue
+        depth.append(1 if inside else 0)
+    return depth
+
+
+def _split_sentences(text):
+    """Sentence split that treats a quotation as one unbreakable unit."""
+    depth = _quote_depth(text)
+    out, start = [], 0
+    for match in _SENTENCE_SPLIT.finditer(text):
+        cut = match.start()
+        if cut < len(depth) and depth[cut]:
+            continue                     # the punctuation is inside a quote
+        piece = text[start:match.start()].strip()
+        if piece:
+            out.append(piece)
+        start = match.end()
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
 
 
 def _coerce(value):
@@ -582,9 +720,13 @@ def _trim(sentence):
     payload: only trim if what remains still carries it (or the original
     never had one, e.g. pure preference sentences)."""
     had_payload = _has_payload(sentence)
+    depth = _quote_depth(sentence)
     for sep in (",", " and ", " while ", " though ", " but "):
         idx = sentence.find(sep)
         while idx != -1:
+            if idx < len(depth) and depth[idx]:
+                idx = sentence.find(sep, idx + 1)   # separator is inside a quote
+                continue
             left = sentence[:idx].strip()
             rest = sentence[idx + len(sep):].strip()
             if len(left) >= 12 and (_has_payload(left) or not had_payload) \
@@ -595,37 +737,109 @@ def _trim(sentence):
     return sentence
 
 
-def _third_person(sentence):
+def _clauses(sentence):
+    """Split into clauses at separators outside any quotation."""
+    depth = _quote_depth(sentence)
+    parts, start = [], 0
+    for match in re.finditer(r",\s+|;\s+|\s+(?:and|but|so|then|while|though)\s+",
+                             sentence):
+        if match.start() < len(depth) and depth[match.start()]:
+            continue
+        piece = sentence[start:match.start()].strip()
+        if piece:
+            parts.append(piece)
+        start = match.end()
+    tail = sentence[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [sentence]
+
+
+def _fit(sentence, limit):
+    """Bring a sentence under `limit` without cutting the payload out.
+
+    Truncating at the limit is what design rule 2 forbids: prose sentences
+    run long, and the name or the date is as likely to be at the end as the
+    beginning. So instead of slicing, pick the clause span that carries the
+    payload and fits. Only if nothing fits does it fall back to cutting, and
+    then at a word boundary.
+    """
+    if len(sentence) <= limit:
+        return sentence
+    clauses = _clauses(sentence)
+    best = None
+    for start in range(len(clauses)):
+        span = ""
+        for end in range(start, len(clauses)):
+            span = (span + ", " + clauses[end]).lstrip(", ") if span else clauses[end]
+            if len(span) > limit:
+                break
+            if _has_payload(span) and (best is None or len(span) > len(best)):
+                best = span
+    if best:
+        return best
+    for clause in sorted(clauses, key=len, reverse=True):
+        if len(clause) <= limit:
+            return clause
+    cut = sentence[:limit]
+    return cut[:cut.rfind(" ")] if " " in cut else cut
+
+
+def _attribute(knot, subject):
+    """A bare quoted line is not a fact until someone is saying it."""
+    stripped = knot.strip()
+    if not stripped[:1] in ('"', "\u201c"):
+        return knot
+    if stripped.count('"') + stripped.count("\u201c") < 1:
+        return knot
+    return "%s says %s" % (subject, stripped)
+
+
+def _third_person(sentence, subject="the user"):
     """'I work as a nurse' -> 'the user works as a nurse' so the model can
-    connect pack entries to questions about 'the user'."""
+    connect pack entries to questions about the person concerned.
+
+    With `subject="Carmine"` the same sentence becomes 'Carmine works as a
+    nurse' — which is what makes a knot answerable once it is cut from the
+    cord it was tied on.
+    """
+    possessive = subject + "'s"
     s = " " + sentence + " "
-    s = re.sub(r"\bI'm\b", "the user is", s)
-    s = re.sub(r"\bI've\b", "the user has", s)
-    s = re.sub(r"\bI'll\b", "the user will", s)
+    s = re.sub(r"\bI'm\b", subject + " is", s)
+    s = re.sub(r"\bI've\b", subject + " has", s)
+    s = re.sub(r"\bI'll\b", subject + " will", s)
     # Irregular verbs, which the -s rule below cannot fix: "the user am not
     # allergic" and "the user have a dog" are what you get without these.
-    s = re.sub(r"\bI am\b", "the user is", s)
-    s = re.sub(r"\bI have\b", "the user has", s)
-    s = re.sub(r"\bI do\b", "the user does", s)
-    s = re.sub(r"\bI go\b", "the user goes", s)
+    s = re.sub(r"\bI am\b", subject + " is", s)
+    s = re.sub(r"\bI have\b", subject + " has", s)
+    s = re.sub(r"\bI do\b", subject + " does", s)
+    s = re.sub(r"\bI go\b", subject + " goes", s)
     s = re.sub(r"\bwe are\b", "the team is", s, flags=re.IGNORECASE)
     s = re.sub(r"\bwe have\b", "the team has", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bI\b", "the user", s)
-    s = re.sub(r"\bmy\b", "the user's", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bmine\b", "the user's", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bme\b", "the user", s)
+    s = re.sub(r"\bI\b", subject, s)
+    s = re.sub(r"\bmy\b", possessive, s, flags=re.IGNORECASE)
+    s = re.sub(r"\bmine\b", possessive, s, flags=re.IGNORECASE)
+    s = re.sub(r"\bme\b", subject, s)
     s = re.sub(r"\bwe're\b", "the team is", s, flags=re.IGNORECASE)
     s = re.sub(r"\bwe\b", "the team", s, flags=re.IGNORECASE)
     s = re.sub(r"\bour\b", "the team's", s, flags=re.IGNORECASE)
     s = _AGREE_RE.sub(lambda m: "the %s %ss" % (m.group(1), m.group(2)), s)
+    if subject != "the user":
+        # the -s agreement rule only knows "the user"/"the team"
+        s = re.sub(r"\b(%s) (%s)\b" % (re.escape(subject), "|".join(_AGREE)),
+                   lambda m: "%s %ss" % (m.group(1), m.group(2)), s)
     return re.sub(r"\s+", " ", s).strip()
 
 
-def extract(text):
-    """Pull the fact-bearing knots out of one piece of user text.
+def extract(text, subject="the user"):
+    """Pull the fact-bearing knots out of one piece of text.
 
-    Returns a list of strings. Pure function, no state — exposed so callers
-    can reuse the extractor without holding a memory.
+    `subject` is who "I" refers to. It defaults to the user, but in a
+    multi-speaker setting — roleplay, group chats — every speaker needs their
+    own, or all of their first-person narration collapses into one person and
+    the names the memory exists to retrieve disappear.
+
+    Returns a list of strings. Pure function, no state.
     """
     if not text:
         return []
@@ -634,14 +848,17 @@ def extract(text):
         sent = OPENERS.sub("", sent.strip() + " ").strip(" .,!?:")
         if len(sent) < MIN_SENTENCE or not _is_fact(sent):
             continue
-        knot = _third_person(_trim(sent))[:MAX_ENTRY_CHARS].strip()
+        knot = _third_person(_trim(sent), subject)
+        knot = _attribute(_fit(knot, MAX_ENTRY_CHARS), subject).strip()
+        if len(knot) > MAX_ENTRY_CHARS:
+            knot = _fit(knot, MAX_ENTRY_CHARS)
         if len(knot) >= MIN_SENTENCE:
             out.append(knot)
     return out
 
 
 def _sentences(text):
-    return [s for s in _SENTENCE_SPLIT.split(text) if s and s.strip()]
+    return _split_sentences(text)
 
 
 class QontextMemory:
@@ -662,14 +879,30 @@ class QontextMemory:
         Hard ceiling on stored knots. When exceeded, the least valuable are
         evicted (oldest first among the least used), so a long-running agent
         cannot grow without bound.
+    speakers:
+        "user" (default) stores facts only from the user. "all" treats every
+        speaker as their own subject, so "I drew my sword" from Carmine
+        becomes "Carmine drew her sword" — needed for roleplay and group
+        chats, where the other party is a character with facts of their own.
     """
 
     FORMAT_VERSION = 2
 
-    def __init__(self, max_entries=DEFAULT_MAX_ENTRIES):
+    def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="user",
+                 weave=None):
         if not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive int")
+        if speakers not in ("user", "all"):
+            raise ValueError("speakers must be 'user' or 'all'")
         self.max_entries = max_entries
+        # "user": only the user states facts (assistant chatter is noise).
+        # "all": every speaker is their own subject — roleplay, group chats,
+        # anywhere the other party is a character with facts of their own.
+        self.speakers = speakers
+        # Optional WordWeave (qontext_weave.py): a persistent map of which
+        # words hang together, used to reach knots the query has no word for.
+        # External on purpose, so this file stays standalone.
+        self.weave = weave
         self._knots = []          # list of dicts: text, seq, hits, ts, w
         self._seen = set()        # exact-duplicate guard
         self._index = {}          # token -> {seq, ...} inverted index
@@ -690,11 +923,17 @@ class QontextMemory:
         text = _coerce(text)
         if not text:
             return []
+        name = _coerce(speaker).strip()
+        low = name.lower()
         with self._lock:
             self._observed += len(text)
-            if _coerce(speaker).strip().lower() != "user":
+            if low in ("user", "you", ""):
+                subject = "the user"
+            elif self.speakers == "user":
                 return []      # assistant chatter never carries new facts
-            return [k for k in extract(text) if self._add(k)]
+            else:
+                subject = name   # roleplay: this speaker is their own subject
+            return [k for k in extract(text, subject) if self._add(k)]
 
     def add(self, knot):
         """Store a fact directly, bypassing extraction. Returns True if new."""
@@ -750,7 +989,8 @@ class QontextMemory:
                         seen.add(id(k))
                         doomed.append(k)
         self._drop(doomed)
-        return max([k["hits"] for k in doomed] + [0])
+        return (max([k["hits"] for k in doomed] + [0]),
+                sum(1 + k.get("reinforced", 0) for k in doomed))
 
     def _add(self, knot):
         """Insert one knot. Caller holds the lock."""
@@ -761,11 +1001,12 @@ class QontextMemory:
         # A correction inherits the standing of what it replaces. Without
         # this, correcting a fact the user asks about constantly resets its
         # retrieval count to zero and hands it to the evictor.
-        inherited = self._supersede(words, frame)
+        inherited, reinforced = self._supersede(words, frame)
         self._seq += 1
         record = {"text": knot, "seq": self._seq, "hits": inherited,
                   "ts": time.time(), "w": words, "f": frame,
-                  "ids": _identifiers(frame)}
+                  "ids": _identifiers(frame), "reinforced": reinforced,
+                  "imp": _importance(knot, reinforced, inherited)}
         self._knots.append(record)
         self._seen.add(knot)
         self._index_add(record)
@@ -833,8 +1074,23 @@ class QontextMemory:
         overflow = len(self._knots) - self.max_entries
         if overflow <= 0:
             return
+        # Importance multiplies distinctiveness rather than outranking it.
+        # Ordering by importance first was measured and was worse: chatter
+        # that happens to say "meeting" inherits a commitment's weight and
+        # survives, while "the user's editor is Neovim" — distinctive, but a
+        # mere tool — gets evicted. Rarity is what tells a fact from filler;
+        # importance says how much that fact is worth.
+        # Importance nudges distinctiveness rather than outranking it. Two
+        # stronger versions were measured and both were worse: ordering by
+        # importance first, and multiplying by the raw 1-5 weight, each let
+        # chatter that happens to say "meeting" survive while "Docs are in
+        # Notion" — distinctive, but in no importance category — was evicted.
+        # Rarity is what separates a fact from filler; importance only says
+        # how much that fact is worth once it has qualified.
         ranked = sorted(self._knots,
-                        key=lambda k: (k["hits"], self._rarity(k), k["seq"]))
+                        key=lambda k: (k["hits"],
+                                       self._rarity(k) * (1 + k.get("imp", 1.0) / 5.0),
+                                       k["seq"]))
         self._drop(ranked[:overflow])
 
     def forget(self, pattern):
@@ -866,6 +1122,12 @@ class QontextMemory:
             return [k["text"] for k in self._knots]
 
     def __len__(self):
+        """Number of knots.
+
+        Note this makes an *empty* memory falsy, as with any container. Test
+        for existence with `is not None`, not `if mem:` — the latter silently
+        skips a memory that simply has not learned anything yet.
+        """
         with self._lock:
             return len(self._knots)
 
@@ -877,12 +1139,25 @@ class QontextMemory:
         return iter(self.entries())
 
     def _expand(self, query):
-        """Query words plus their statement-side synonyms."""
+        """Query words, their synonyms, and whatever the weave associates.
+
+        Returns (all tokens, tokens that came only from association) so the
+        caller can weight the second group lower — a thread the weave learned
+        is weaker evidence than a word the user actually typed.
+        """
         qwords = set(_words(query))
         expanded = set(qwords)
         for w in qwords:
             expanded |= SYNONYMS.get(w, set())
-        return expanded
+        associated = set()
+        if self.weave is not None:
+            raw = {w.lower() for w in re.findall(r"[\w-]+", _coerce(query))}
+            for word in self.weave.expand(raw):
+                stem = _stem(word)
+                if stem not in expanded:
+                    associated.add(stem)
+            expanded |= associated
+        return expanded, associated
 
     def _weights(self, expanded):
         """Inverse document frequency per query token.
@@ -902,9 +1177,17 @@ class QontextMemory:
     def _score(self, record, expanded, about_user, weights):
         matched = expanded & record["w"]
         overlap = sum(weights[t] for t in matched)
+        if overlap and about_user and SUBJECT_FOCUS:
+            text = record["text"].lower()
+            first_party = (("the user" in text or "the team" in text)
+                           and not _CHAINED_POSSESSIVE.search(text))
+            if not first_party:
+                overlap *= (1.0 - SUBJECT_FOCUS)
         # Length normalisation: a long knot has more words and so more chances
         # to match by accident, and it costs more of the budget when it wins.
         # Between two knots that answer equally well, take the denser one.
+        if overlap and IMPORTANCE_RANK:
+            overlap *= (record.get("imp", 1.0) / 3.0) ** IMPORTANCE_RANK
         if overlap and LENGTH_NORM:
             overlap *= (REFERENCE_LENGTH / max(len(record["text"]),
                                                REFERENCE_LENGTH)) ** LENGTH_NORM
@@ -959,10 +1242,12 @@ class QontextMemory:
         before reaching it. Pass all_knots=True when the caller genuinely
         wants every knot ranked (explain()).
         """
-        expanded = self._expand(query)
+        expanded, associated = self._expand(query)
         about_user = "user" in _coerce(query).lower()
         pool = self._knots if all_knots else self._candidates(expanded)
         weights = self._weights(expanded)
+        for token in associated:
+            weights[token] *= ASSOCIATION_WEIGHT
         scored = [(self._score(k, expanded, about_user, weights), k)
                   for k in pool]
         scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -979,6 +1264,31 @@ class QontextMemory:
         with self._lock:
             if not self._knots:
                 return ""
+
+            # A reserved slice, chosen by importance and not by the query.
+            #
+            # Retrieval assumes the query tells you what to fetch. In a chat
+            # it does; in roleplay it does not — "I lean over and kiss her
+            # cheek" shares no words with the facts the reply will need, and
+            # measured on real logs a purely query-driven pack carried 2% of
+            # them. The standing facts (who people are, what was agreed) are
+            # needed in every scene regardless of what the turn says, so a
+            # fraction of the budget carries them unconditionally.
+            reserved, used = [], 0
+            if PACK_RESERVE > 0 and len(self._knots) > 1:
+                allowance = int(budget * PACK_RESERVE)
+                for k in sorted(self._knots,
+                                key=lambda k: (k.get("imp", 1.0), k["seq"]),
+                                reverse=True):
+                    cost = len(k["text"]) + (1 if reserved else 0)
+                    if used + cost > allowance:
+                        continue
+                    reserved.append(k)
+                    used += cost
+                    if used >= allowance * 0.9:
+                        break
+            taken = {id(k) for k in reserved}
+
             ranked = self._ranked(query)
             if not ranked:
                 # nothing matched: send the newest knot rather than nothing,
@@ -988,14 +1298,20 @@ class QontextMemory:
                     return ""
                 newest["hits"] += 1
                 return newest["text"]
-            # A weak match is worse than no match: it spends budget the
-            # strong matches need and hands the model a distractor. Keep only
-            # knots within a fraction of the best score.
-            floor = ranked[0][0][0] * RELEVANCE_FLOOR
-            out, total = [], 0
+            # A weak match is worse than no match in a small memory: it
+            # spends budget the strong matches need. In a large one the same
+            # rule backfires — the top score is inflated by whichever long
+            # knot matched best, and half of it cuts off the answer along
+            # with the noise. Measured on a 481-knot roleplay log, dropping
+            # the floor recovers 2 of 20 facts at no cost to the small suites.
+            floor = (ranked[0][0][0] * RELEVANCE_FLOOR
+                     if len(self._knots) <= FLOOR_MAX_KNOTS else 0.0)
+            out, total = list(reserved), used
             for score, k in ranked:
                 if score[0] < floor:
                     break
+                if id(k) in taken:
+                    continue
                 cost = len(k["text"]) + (1 if out else 0)
                 if total + cost > budget:
                     continue
@@ -1016,6 +1332,8 @@ class QontextMemory:
         with self._lock:
             stored = sum(len(k["text"]) for k in self._knots)
             return {
+                "mean_importance": (sum(k.get("imp", 1.0) for k in self._knots)
+                                    / len(self._knots)) if self._knots else 0.0,
                 "observed_chars": self._observed,
                 "stored_chars": stored,
                 "entries": len(self._knots),
@@ -1075,7 +1393,8 @@ class QontextMemory:
                 record = {"text": text, "seq": int(seq or 0),
                           "hits": int(hits or 0), "ts": float(ts or 0.0),
                           "w": frozenset(_words(text)), "f": knot_frame,
-                          "ids": _identifiers(knot_frame)}
+                          "ids": _identifiers(knot_frame), "reinforced": 0,
+                          "imp": _importance(text, 0, int(hits or 0))}
                 mem._knots.append(record)
                 mem._seen.add(text)
                 mem._index_add(record)
@@ -1088,7 +1407,8 @@ class QontextMemory:
                     knot_frame = _frame(text)
                     record = {"text": text, "seq": mem._seq, "hits": 0,
                               "ts": 0.0, "w": frozenset(_words(text)),
-                              "f": knot_frame, "ids": _identifiers(knot_frame)}
+                              "f": knot_frame, "ids": _identifiers(knot_frame),
+                              "reinforced": 0, "imp": _importance(text)}
                     mem._knots.append(record)
                     mem._seen.add(text)
                     mem._index_add(record)

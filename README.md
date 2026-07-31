@@ -1,219 +1,142 @@
-# Qontext Memory
+# Qontext
 
-A conversational memory for language models, shaped like a quipu: facts are
-**knots** — short, self-contained, third-person statements — and each prompt
-carries only the knots relevant to it, instead of the whole transcript.
+A quipu-inspired conversational memory for language models. Pure Python, one
+file, no dependencies, Python 3.8+.
 
-The point is not saving tokens. It is that **small models answer better from a
-dense pack than from a full transcript**: 10/10 correct from a 300-character
-pack against 4/10 from the transcript it was distilled from, in the benchmark
-this came out of. Attention is scarcer than context.
-
-- Single file, standard library only, no dependencies.
-- Python 3.8+. Thread-safe. No side effects on import.
-- `qontext_memory.py` is the whole library — copy it into your project.
-
-## Install
-
-```
-cp qontext_memory.py your_project/
-```
-
-That's it. No packaging, no dependencies — one file and the standard library.
-
-## Use
+The Inca recorded information as knots on cords — not a transcript of
+everything said, but a compact encoding of what was worth keeping. Qontext
+stores a conversation the same way: short, self-contained facts ("knots"), and
+`pack(query, budget)` returns only the ones a given question needs.
 
 ```python
 from qontext_memory import QontextMemory
 
-mem = QontextMemory.load("qontext.qx")          # empty if the file is missing
+memory = QontextMemory()
+memory.observe("user", "People call me Marta and I work as a nurse.")
+memory.observe("user", "The report is due March 3rd, hard deadline.")
 
-mem.observe("user", "Morning! People call me Marta and I work as a nurse.")
-mem.observe("assistant", "Nice to meet you, Marta.")
-mem.observe("user", "Oh, before I forget: the demo is on Friday at 10:00.")
-mem.observe("user", "The traffic was awful today, took me an hour to get home.")
-
-print(mem.entries())
-# ['People call the user Marta and the user works as a nurse',
-#  'the demo is on Friday at 10:00']
-
-print(mem.pack("When is the demo?", budget=300))
-# 'the demo is on Friday at 10:00'
-
-mem.save("qontext.qx")
+memory.pack("when is the report due?", 300)
+# 'the report is due March 3rd'
 ```
 
-Two things to notice: the traffic complaint was not stored, and "I work as a
-nurse" became "the user works as a nurse" — a knot cut from the cord has to
-still name its subject.
+## What it is for
 
-### In a chat loop
+A long conversation does not fit in a small context window, and sending all of
+it is expensive even when it does. Qontext keeps a fixed-size summary that does
+not grow with the conversation.
 
-```python
-def build_prompt(mem, history, user_message):
-    facts = mem.pack(user_message, budget=300)
-    system = "You are a helpful assistant."
-    if facts:
-        system += "\n\nKnown facts:\n" + facts
-    return ([{"role": "system", "content": system}]
-            + history[-6:]                       # short recency window
-            + [{"role": "user", "content": user_message}])
-```
+**Measured on 800-turn conversations whose filler is real human dialogue,
+against a 12B model, three seeds:**
 
-Then after each turn:
-
-```python
-mem.observe("user", user_message)
-mem.observe("assistant", reply)
-mem.save("qontext.qx")
-```
-
-`live_agent.py` is a complete working example: a chat agent against a local
-llama.cpp server that observes every turn, packs every prompt, and persists to
-`qontext.qx`. Run `python live_agent.py --selftest` to exercise it without a
-server.
-
-## API
-
-| Method | What it does |
-|---|---|
-| `observe(speaker, text)` | Watch a message. Only `"user"` text creates knots. Returns the new ones. |
-| `add(knot)` | Store a fact directly, skipping extraction. Returns `True` if new. |
-| `pack(query, budget=300)` | The densest relevant knots that fit in `budget` characters. |
-| `entries()` | Every knot, oldest first. |
-| `forget(pattern)` | Drop knots containing `pattern`. Returns how many. |
-| `clear()` | Drop everything. |
-| `explain(query, budget)` | `[(score, in_pack, text)]` — why `pack()` chose what it chose. |
-| `stats()` | `observed_chars`, `stored_chars`, `entries`, `density`, `max_entries`. |
-| `save(path)` / `load(path)` | Atomic write; `load` returns an empty memory rather than raising. |
-| `serialize()` / `deserialize(data)` | The same thing as bytes, if you store it yourself. |
-
-`len(mem)`, `iter(mem)` and `knot in mem` work as you would expect.
-
-## Behaviour worth knowing
-
-**It forgets on purpose.** `max_entries` (default 500) is a hard ceiling. When
-it is reached, the least valuable knots go first: never retrieved, then least
-distinctive, then oldest. Distinctiveness matters — evicting purely by age
-loses the user's name on turn 3000 of a chatty session while keeping three
-thousand variations of "the meeting ran long".
-
-**Corrections replace, they do not accumulate.** "My manager is Priya" followed
-by "My manager is Tomas now" leaves one knot, the current one — and the
-replacement inherits the standing of what it replaced, so correcting a fact you
-ask about constantly does not make it evictable. The correction does not have
-to be worded like the original.
-
-This works on the knot's **frame**: what is left after removing its payload
-(capitalised names, numbers, weekdays, months, hyphenated codenames) and its
-filler (correction markers, vague time nouns, generic change verbs). Two knots
-replace each other only if their frames are identical.
-
-**Distinct facts that share vocabulary never merge.** That is the property the
-frame exists to protect, and it is enforced conservatively: anything the frame
-does not recognise stays in it as itself, so `dog`/`cat`, `daughter`/`brother`,
-`manager`/`supervisor`, `report`/`invoice` and `GPU`/`CPU` produce different
-frames. Numbers hanging off a noun are identifiers rather than payload, so
-"the manager of team 5" and "team 7" stay separate despite sharing four words
-in five. Only three merges are hand-allowed — name/called, live/based/situated,
-due/deadline — because saying those the other way means the same thing.
-
-The suite proves this two ways: 25 hand-picked shared-vocabulary pairs that
-must both survive, and every pair of facts within a conversation
-cross-multiplied (1753 pairs), where zero merges are allowed. `eval_supersede.py`
-runs both.
-
-*Known limitation:* a correction with no relation word at all — "Actually I'm
-in Antwerp now" after "I live in Rotterdam" — has an empty frame and will not
-supersede, because the only thing that could link them is the preposition, and
-"I'm in Antwerp" is not distinguishable from "I'm in IT" without guessing.
-Guessing there would risk merging real facts, so it does not.
-
-**Nothing it is handed can crash it.** `None`, bytes, integers, control
-characters, 200 KB of regex metacharacters — all fine. A corrupt memory file
-costs the user their history, not their session.
-
-**The pack never exceeds its budget.** If nothing matches the query it sends
-the single newest knot rather than nothing, so the model still has grounding.
-
-## Tuning
-
-Constants at the top of the file:
-
-| Constant | Default | Effect |
+| | full transcript | Qontext pack |
 |---|---|---|
-| `DEFAULT_BUDGET` | 300 | characters of pack per prompt |
-| `DEFAULT_MAX_ENTRIES` | 500 | hard ceiling on stored knots |
-| `MAX_ENTRY_CHARS` | 120 | a knot longer than this is not a knot |
-| `SUPERSEDE_SIMILARITY` | 0.6 | word overlap at which a knot replaces another |
-| `RELEVANCE_FLOOR` | 0.5 | drop knots scoring under this fraction of the best |
-| `LENGTH_NORM` | 0.5 | how strongly to prefer shorter knots (0 = off) |
+| accuracy | 9.3 / 10 | 9.7 / 10 |
+| prompt tokens per call | 13,853 | **116** |
+| reasoning generated | 1,697 chars | 789 chars |
+| prompt processing | 6.6 s | 0.4 s |
 
-The vocabulary tables — `MARKERS`, `OPENERS`, `STOP`, `SYNONYMS` — decide what
-counts as a fact and how questions reach statements. They are the real tuning
-surface. Every table is normalised through `_stem()` at import, and so is the
-text they are matched against; if you add entries by hand, add plain words and
-let the normaliser handle them.
+Three seeds cannot separate 9.3 from 9.7 — that is a tie. **The 119x reduction
+is the result**: the same answers for one percent of the prompt.
 
-## Testing
+On smaller models the picture is stronger and more conditional. A 9B scores
+4.3/10 from a transcript full of plausible wrong answers against the pack's
+8.0; a 4B scores 4/10 against 10/10. The honest statement is that *context
+reduction improves accuracy when the context holds plausible wrong answers and
+the model is at or past its ability to choose among them* — distractor density
+sets the difficulty, model capability sets the threshold. On a capable model
+you get the saving, not the accuracy.
 
-```
-python test_qontext_memory.py        # 80 tests: contract, fuzz, persistence, threads
-python eval_memory.py                # recall / density / noise on three conversations
-python eval_memory.py --perf         # pack() latency as the memory grows
-python eval_supersede.py             # corrections caught / distinct facts protected
-python qontext_memory.py demo        # a small demo
-```
-
-`eval_memory.py` scores the three conversations in `conversations.py`: A (the
-one the extractor was tuned on), B (held out, different phrasings), and C (150
-turns, 40 facts, deliberate distractors). Current numbers:
-
-| suite | recall @150 | recall @300 | density |
-|---|---|---|---|
-| A | 10/10 | 10/10 | 0.30 |
-| B | 10/10 | 10/10 | 0.41 |
-| C | 37/40 | 40/40 | 0.48 |
-
-`pack()` stays under a millisecond against 10,000 knots.
-
-There is also a CLI for looking at a memory file directly:
-
-```
-python qontext_memory.py show   qontext.qx
-python qontext_memory.py stats  qontext.qx
-python qontext_memory.py pack   qontext.qx "when is the demo?"
-python qontext_memory.py why    qontext.qx "when is the demo?"
-python qontext_memory.py forget qontext.qx "bikkel"
-```
+`Qontext_Study_Report.pdf` is the full write-up, corrections included.
 
 ## Design rules
 
-Three, each paid for with a failed run:
+Three rules, each paid for with a failed run:
 
-1. **A knot must name its subject.** Entries saying "I" become unanswerable
-   once cut from the cord; "the user works as a nurse" survives alone. This
-   single fix took the benchmark from 6/10 to 10/10.
+1. **A knot must name its subject.** "I work as a nurse" is unanswerable once
+   cut from the conversation; "the user works as a nurse" survives alone.
 2. **The payload is the point.** "People call me" without "Marta" is a knot
-   tied around nothing. Never trim the name, day, place or number out.
+   tied around nothing. Never trim the name, day, place or number out of an
+   entry.
 3. **Fewer, better knots.** Density comes from selection, not truncation.
-   Cutting entries short to meet a budget destroys exactly the meaning the
-   budget exists to protect.
+   Cutting entries short to meet a budget destroys the meaning the budget
+   exists to protect.
 
-## Where this came from
+## What is here
 
-Qontext started as a study of small local models — "can a 4B model build its own
-context memory with tools, and is the structure any good?" The benchmark answer
-was that a 26-turn transcript gave the model 4/10 correct answers, while a
-300-character pack distilled from that same transcript gave 10/10. Reducing
-context was not a cost saving; it was an accuracy win, because a small model's
-attention runs out long before its context window does.
+| | |
+|---|---|
+| `qontext_memory.py` | the library — extraction, ranking, supersession, eviction |
+| `test_qontext_memory.py` | 91 tests, stdlib `unittest` |
+| `qontext_cords.py` | records how knots hang together, walks the links at retrieval |
+| `qontext_rp.py` | roleplay build: state-aware extraction, per-character subjects, scene packs |
+| `qontext_weave.py`, `seed_weave.py` | optional word-association layer (off by default) |
+| `live_agent.py` | a small chat agent using the memory |
+| `eval_memory.py`, `eval_supersede.py`, `stress_conv.py` | offline evaluation suites |
+| `bench/long_bench.py` | the long-conversation benchmark, with a real-dialogue filler mode |
+| `bench/turing_bench.py` | an imitation-game evaluation that needs no answer key |
+| `bench/build_filler.py` | rebuilds the DailyDialog filler (not redistributed — see Licence) |
+| `extension/` | SillyTavern extension: a JS port with a parity test against the Python |
+| `RP_FINDINGS.md`, `bench/LIVE_RUN_FINDINGS.md` | every measurement, including the ones that went against us |
 
-The three design rules above are the residue of four failed runs. Everything
-else here — the eviction policy, the supersession frames, the relevance floor —
-exists because a measurement said it helped, and several plausible ideas were
-reverted because the measurement said they did not.
+```
+python -m unittest -v test_qontext_memory
+python live_agent.py
+```
 
-## License
+## Roleplay
 
-MIT. See `LICENSE`.
+`qontext_rp.RPMemory` is the same idea under roleplay's assumptions. The chat
+extractor admits a sentence on a marker or a payload — a number, a date, a
+capital — and roleplay's most important sentences have none of those. *"I am at
+the harbour now, not the shrine"* was dropped entirely, leaving only *"Plans
+changed"*. The RP build treats **state as payload**: place, possession,
+condition, kinship and commitment, recognised structurally because the nouns of
+a setting cannot be known in advance.
+
+Measured on 11 public roleplay logs, turn-shaped queries at budget 1200: 4.1%
+of needed facts carried by the chat build, **9.9%** by the RP build. That is a
+doubling, and it is still one fact in ten — the turn-shaped task is mostly
+unsolved, and now measured rather than assumed.
+
+## SillyTavern extension
+
+Copy `extension/qontext/` into
+`SillyTavern/public/scripts/extensions/third-party/`. Three modes: regular
+(off), augment, replace.
+
+The vocabulary tables are **generated** from the Python source rather than
+retyped, and `extension/parity.mjs` replays scenarios through both
+implementations and fails on any divergence. It found a real bug during the
+port.
+
+## The word weave, and why it is off
+
+`qontext_weave.py` links words by co-occurrence so a query can reach a knot it
+shares no word with. The mechanism works — seeded from WikiText-103 it knows
+`vampire → slayer, dracula` and `allergic → anaphylaxis, asthma`. Measured on
+real logs it was neutral to slightly harmful at every setting. Kept, wired,
+documented, and `None` by default.
+
+## Honest limitations
+
+- The ten benchmark questions are ours, even where the conversation is not.
+- Measurements come from one machine and two local quantised models.
+- Answers are scored by keyword match, not judgement.
+- The roleplay result has no model-in-the-loop validation, only a proxy.
+
+## Licence
+
+**PolyForm Noncommercial License 1.0.0** — see `LICENSE`.
+
+Free to use, modify, and share for research, teaching, personal projects, and
+by non-profit, educational and government organisations. **Commercial use is
+not permitted.** For a commercial licence, open an issue.
+
+This is *source-available* rather than open source in the OSI sense: the
+"no commercial use" restriction is what the OSI definition excludes. Calling it
+source-available is the accurate description.
+
+The DailyDialog filler used by `bench/long_bench.py --filler daily` is **not
+redistributed here** — DailyDialog carries its own licence, and
+`bench/build_filler.py` rebuilds the file from the original dataset in one
+command.

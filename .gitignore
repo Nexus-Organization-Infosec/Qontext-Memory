@@ -1,23 +1,17 @@
 __pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
+*.pyc
 
-# memory files written by the agent
-*.qx
+# Corpora and derived data are not redistributed here.
+#
+# wikitext-103/ is 517 MB of someone else's corpus.
+# *.qw are weave files built from it (11 MB) — reproducible with seed_weave.py.
+# dailydialog_pairs.tsv is derived from DailyDialog, which is CC BY-NC-SA 4.0;
+# this repository is MIT, and shipping the derivative would put the two
+# licences in conflict. build_filler.py rebuilds it from the original dataset.
+wikitext-103/
+*.qw
+dailydialog_pairs.tsv
 
-# environments and editors
-.venv/
-venv/
-.env
-.idea/
-.vscode/
-.DS_Store
-
-# models and other large local artefacts — never commit these
-*.gguf
-*.bin
-*.safetensors
-*.tar.gz
+# Nothing from a private log directory belongs in a public repository.
+RP_Logs/
+*.jsonl

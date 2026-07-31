@@ -1,0 +1,9 @@
+.qontext-settings label { display: block; margin-top: 8px; }
+.qontext-settings small { display: block; opacity: 0.7; margin-bottom: 4px; }
+.qontext-out {
+    white-space: pre-wrap;
+    max-height: 240px;
+    overflow: auto;
+    font-size: 0.85em;
+    opacity: 0.9;
+}

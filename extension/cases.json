@@ -1,0 +1,187 @@
+[
+ {
+  "name": "harbour",
+  "reserve": 0.5,
+  "maxEntries": 800,
+  "turns": [
+   [
+    "Carmine",
+    "I hate the harbour. \"Too many people, and they all stare,\" she mutters."
+   ],
+   [
+    "User",
+    "*I take her hand* Then we go inland. My name is Chance, by the way."
+   ],
+   [
+    "Carmine",
+    "She laughs. \"Chance. Of course it is.\" Her fangs catch the lamplight."
+   ],
+   [
+    "Carmine",
+    "I was turned in 1878, outside Marseille. I don't talk about it."
+   ],
+   [
+    "User",
+    "We should meet at the shrine by the new moon."
+   ],
+   [
+    "Carmine",
+    "Carmine nods slowly. \"The shrine, then. I will be there before you.\""
+   ],
+   [
+    "Carmine",
+    "I am wearing the grey coat tonight."
+   ],
+   [
+    "Carmine",
+    "I am at the harbour now, not the shrine. Plans changed."
+   ],
+   [
+    "Carmine",
+    "My sister Vesna is still alive. I promised her I would return."
+   ]
+  ],
+  "extracted": [
+   [
+    "Carmine hates the harbour"
+   ],
+   [
+    "the user's name is Chance"
+   ],
+   [],
+   [
+    "Carmine was turned in 1878, outside Marseille"
+   ],
+   [
+    "the team should meet at the shrine by the new moon"
+   ],
+   [],
+   [
+    "Carmine is wearing the grey coat tonight"
+   ],
+   [
+    "Carmine is at the harbour now, not the shrine",
+    "Plans changed"
+   ],
+   [
+    "Carmine's sister Vesna is still alive",
+    "Carmine promised her Carmine would return"
+   ]
+  ],
+  "scenes": [
+   [
+    "*I lean over and kiss her cheek*",
+    600,
+    "Carmine hates the harbour\nthe user's name is Chance\nthe team should meet at the shrine by the new moon\nCarmine is wearing the grey coat tonight\nCarmine is at the harbour now, not the shrine\nPlans changed\nCarmine's sister Vesna is still alive\nCarmine promised her Carmine would return"
+   ],
+   [
+    "where are you now?",
+    300,
+    "Carmine hates the harbour\nthe user's name is Chance\nthe team should meet at the shrine by the new moon\nCarmine is wearing the grey coat tonight\nCarmine is at the harbour now, not the shrine\nPlans changed\nCarmine's sister Vesna is still alive\nCarmine promised her Carmine would return"
+   ],
+   [
+    "who is your sister?",
+    200,
+    "Carmine hates the harbour\nthe user's name is Chance\nCarmine's sister Vesna is still alive"
+   ]
+  ]
+ },
+ {
+  "name": "plain",
+  "reserve": 0.5,
+  "maxEntries": 800,
+  "turns": [
+   [
+    "User",
+    "People call me Marta and I work as a nurse."
+   ],
+   [
+    "User",
+    "The sprint demo is on Friday at 10:00."
+   ],
+   [
+    "User",
+    "My dog is called Bikkel."
+   ],
+   [
+    "Anna",
+    "I live in Utrecht, near the old canal."
+   ]
+  ],
+  "extracted": [
+   [
+    "People call the user Marta and the user works as a nurse"
+   ],
+   [
+    "The sprint demo is on Friday at 10:00"
+   ],
+   [
+    "the user's dog is called Bikkel"
+   ],
+   [
+    "Anna lives in Utrecht"
+   ]
+  ],
+  "scenes": [
+   [
+    "what is the dog called?",
+    300,
+    "People call the user Marta and the user works as a nurse\nThe sprint demo is on Friday at 10:00\nthe user's dog is called Bikkel\nAnna lives in Utrecht"
+   ],
+   [
+    "tell me about work",
+    300,
+    "People call the user Marta and the user works as a nurse\nThe sprint demo is on Friday at 10:00\nthe user's dog is called Bikkel\nAnna lives in Utrecht"
+   ]
+  ]
+ },
+ {
+  "name": "state-churn",
+  "reserve": 0.5,
+  "maxEntries": 800,
+  "turns": [
+   [
+    "Vesna",
+    "I am in the forest. It is cold."
+   ],
+   [
+    "Vesna",
+    "I am at the tavern now."
+   ],
+   [
+    "Vesna",
+    "I am wounded and afraid."
+   ],
+   [
+    "Vesna",
+    "I promised the captain I would not run."
+   ]
+  ],
+  "extracted": [
+   [
+    "Vesna is in the forest"
+   ],
+   [
+    "Vesna is at the tavern now"
+   ],
+   [
+    "Vesna is wounded and afraid"
+   ],
+   [
+    "Vesna promised the captain Vesna would not run"
+   ]
+  ],
+  "scenes": [
+   [
+    "*I follow her*",
+    400,
+    "Vesna is in the forest\nVesna is at the tavern now\nVesna is wounded and afraid\nVesna promised the captain Vesna would not run"
+   ],
+   [
+    "is she hurt?",
+    200,
+    "Vesna is in the forest\nVesna is wounded and afraid\nVesna promised the captain Vesna would not run"
+   ]
+  ]
+ }
+]
