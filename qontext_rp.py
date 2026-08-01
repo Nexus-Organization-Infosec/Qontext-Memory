@@ -58,6 +58,7 @@ from collections import Counter
 
 from qontext_cords import CordMemory
 from qontext_memory import (MAX_ENTRY_CHARS, MIN_SENTENCE, OPENERS, _attribute,
+                            _is_question,
                             _coerce, _fit, _is_fact, _split_sentences, _stem,
                             _third_person, _trim, MARKERS)
 
@@ -148,8 +149,13 @@ def rp_extract(text, subject, known=None):
     out = []
     for sentence in _split_sentences(_coerce(text)):
         stripped = sentence.strip()
-        if not stripped:
+        if not stripped or _is_question(stripped):
             continue
+        # Note what is *not* filtered here: sentences addressed to the other
+        # party. In assistant chat "you will have a good time in New York" is
+        # noise, because the assistant has no facts of its own. In a scene,
+        # "you are the vampire's sire" is a fact about the other character and
+        # exactly what a roleplay memory exists to keep.
         # A sentence that is nothing but a quotation belongs to dialogue.
         without_quotes = _QUOTED.sub(" ", stripped).strip(" .,!?:;-—*_")
         if len(without_quotes) < 12:

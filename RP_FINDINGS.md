@@ -489,3 +489,89 @@ finish it — a query that shares no vocabulary with its answer is not a ranking
 problem. What changed here is that the memory now *contains* the right things
 and states them in a retrievable form; what has not changed is that a roleplay
 turn is a poor query.
+
+
+# Half the memory was not facts
+
+Found by measuring what a pack actually contained, after real dialogue
+replaced synthetic filler. Of 259 knots extracted from an 800-turn
+DailyDialog conversation:
+
+| category | share of knots |
+|---|---|
+| starts as a question | 24% |
+| addresses "you" | 20% |
+| imperative | 3% |
+| **combined** | **47%** — and 50% of stored characters |
+
+```
+Do you think you'll ever get another pet
+What was the party like last night, Jean
+Don't believe what you see on TV
+can the user uses your laptop for a while
+```
+
+None of those are claims about anybody. The extractor was built for a user
+*stating* things, and every benchmark conversation before DailyDialog
+consisted only of statements — so this was invisible for the entire project
+and had been eating half the memory the whole time.
+
+## The filter, and the trap in it
+
+Two rules, in `extract()`:
+
+1. **A question is not a fact, whoever asks it.** Checked on the raw sentence,
+   because the opener strip removes the question mark along with the rest of
+   the punctuation and by then the evidence is gone.
+2. **A remark aimed at the other party is not a fact about the speaker** —
+   unless it also names the speaker. "You will have a good time in New York"
+   goes; "I told you about my sister Vesna" stays.
+
+Imperatives are deliberately *not* filtered, and the reason is in the junk
+list itself:
+
+```
+Please keep explanations brief
+```
+
+That is one of the benchmark's ten planted facts. Preferences are imperative
+in form and factual in content, so a naive "drop commands" rule deletes real
+answers. Two rules that are cheap to verify beat a third that needs judgement.
+
+Rule 2 is off for roleplay (`drop_address=False`). In assistant chat the other
+party is the assistant, which has no facts of its own; in a scene it is a
+character, and "you are the vampire's sire" is exactly what the memory exists
+to keep.
+
+## Measured, everything
+
+| | before | after |
+|---|---|---|
+| unit tests | 91 pass | **98 pass** |
+| suite A / B recall | 10/10, 10/10 | unchanged |
+| suite C @150 / @300 | 37/40, 40/40 | unchanged |
+| suite C noise @300 | 12% | unchanged |
+| supersede corrections / safety / invariant | 10/11, 27/27, 0 | unchanged |
+| knots stored (real filler, 3 seeds) | 749 / 770 / 692 | **451 / 476 / 454** |
+| junk characters | 45% / 41% / 39% | **20% / 13% / 14%** |
+| containment (0/10/30% decoys) | 30/30, 28/30, 29/30 | 30/30, **29/30**, 29/30 |
+| RP turnbench @300/@600/@1200 | 3.4% / 5.9% / 10.4% | 3.4% / 5.7% / 10.4% |
+
+**Forty percent fewer knots stored, junk more than halved, and containment
+slightly better.** Every chat suite is untouched, which is the point: the
+filter removes things that were never facts, so nothing that was working
+should move — and nothing did.
+
+The residual 13-20% overstates what is left; the measuring regex is cruder
+than the filter and counts knots that legitimately contain "you" alongside a
+first-person subject.
+
+## Where it came from
+
+A suggestion that stenography might be worth borrowing from — chorded strokes
+carrying several units at once. Applied to knots, the analogue was to stop
+repeating the subject across knots about the same person. Measured, that is
+worth **2.4%** of pack budget and is not worth doing.
+
+But the measurement printed a pack, and the pack was full of questions. The
+idea was wrong and the test it motivated found something twenty times larger.

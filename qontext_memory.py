@@ -831,7 +831,7 @@ def _third_person(sentence, subject="the user"):
     return re.sub(r"\s+", " ", s).strip()
 
 
-def extract(text, subject="the user"):
+def extract(text, subject="the user", drop_address=True):
     """Pull the fact-bearing knots out of one piece of text.
 
     `subject` is who "I" refers to. It defaults to the user, but in a
@@ -839,13 +839,21 @@ def extract(text, subject="the user"):
     own, or all of their first-person narration collapses into one person and
     the names the memory exists to retrieve disappear.
 
+    `drop_address` discards sentences aimed at the other party. True for
+    assistant chat, where the other party is the assistant; False for
+    roleplay, where it is a character with facts of their own.
+
     Returns a list of strings. Pure function, no state.
     """
     if not text:
         return []
     out = []
-    for sent in _sentences(text):
-        sent = OPENERS.sub("", sent.strip() + " ").strip(" .,!?:")
+    for raw in _sentences(text):
+        # Checked before trimming: the opener strip removes the question mark
+        # along with the punctuation, and by then the evidence is gone.
+        if _is_question(raw) or (drop_address and _addresses_other(raw)):
+            continue
+        sent = OPENERS.sub("", raw.strip() + " ").strip(" .,!?:")
         if len(sent) < MIN_SENTENCE or not _is_fact(sent):
             continue
         knot = _third_person(_trim(sent), subject)
@@ -859,6 +867,46 @@ def extract(text, subject="the user"):
 
 def _sentences(text):
     return _split_sentences(text)
+
+
+# Not every sentence in a conversation is a claim about anybody.
+#
+# The extractor was built for a user *stating* things, and every benchmark
+# conversation before real dialogue arrived consisted only of statements. Fed
+# 800 turns of DailyDialog, 47% of stored knots turned out to be questions,
+# remarks addressed to the other party, or fragments of neither:
+#
+#     "Do you think you'll ever get another pet"
+#     "What was the party like last night, Jean"
+#     "Don't believe what you see on TV"
+#
+# Half the stored characters, and every one of them competing for pack budget
+# and ranking position against facts that are real.
+_QUESTION = re.compile(r"\?\s*$")
+_SECOND_PERSON = re.compile(r"\byou\b|\byour\b|\byours\b|\byou'(?:re|ll|ve|d)\b",
+                            re.I)
+_FIRST_PERSON = re.compile(r"\bI\b|\bI'(?:m|ve|ll|d)\b|\bmy\b|\bmine\b|\bme\b"
+                           r"|\bwe\b|\bwe'(?:re|ve|ll)\b|\bour\b|\bus\b", re.I)
+
+
+def _is_question(sentence):
+    """A question is not a fact, whoever is asking it."""
+    return bool(_QUESTION.search(sentence))
+
+
+def _addresses_other(sentence):
+    """A claim about the person being spoken to rather than the speaker.
+
+    "You will have a good time in New York" says nothing about the user. A
+    sentence naming both parties ("I told you about my sister") does, so the
+    presence of any first-person reference keeps it.
+
+    Deliberately off for roleplay: in a scene, "you are the vampire's sire" is
+    a fact about the other character and worth keeping. In assistant chat the
+    other party is the assistant, which has no facts of its own.
+    """
+    return bool(_SECOND_PERSON.search(sentence)
+                and not _FIRST_PERSON.search(sentence))
 
 
 class QontextMemory:

@@ -869,5 +869,69 @@ class TestRealConversation(unittest.TestCase):
         os.rmdir(d)
 
 
+class NotEveryUtteranceIsAFact(unittest.TestCase):
+    """Questions and remarks aimed at the other party are not claims.
+
+    Found only once the benchmarks used real dialogue: 47% of knots extracted
+    from 800 turns of DailyDialog were questions, second-person remarks, or
+    commands — half the stored characters, all of them competing with real
+    facts for pack budget and ranking position.
+    """
+
+    def test_a_question_is_not_a_fact(self):
+        for question in ("Do you think you'll ever get another pet?",
+                         "What was the party like last night, Jean?",
+                         "How many people does your company employ?",
+                         "Is the report due in March?"):
+            self.assertEqual(extract(question), [],
+                             "stored a question: %r" % question)
+
+    def test_a_remark_about_the_other_party_is_not_a_fact(self):
+        for remark in ("You will have a good time in New York.",
+                       "Don't believe what you see on TV.",
+                       "Your laptop is faster than that one."):
+            self.assertEqual(extract(remark), [],
+                             "stored second-person chatter: %r" % remark)
+
+    def test_naming_both_parties_keeps_the_fact(self):
+        # "I told you about my sister" is about the speaker, not the listener.
+        knots = extract("I told you about my sister Vesna.")
+        self.assertTrue(knots)
+        self.assertIn("Vesna", knots[0])
+
+    def test_a_stated_preference_survives(self):
+        # The trap: preferences are imperative in form and factual in content.
+        # A naive "drop commands" rule deletes one of the benchmark's own facts.
+        knots = extract("Please keep explanations brief, I skim a lot.")
+        self.assertTrue(knots, "dropped a stated preference")
+        self.assertIn("brief", knots[0].lower())
+
+    def test_ordinary_statements_are_untouched(self):
+        for statement, expected in (
+                ("People call me Marta.", "marta"),
+                ("I work as a nurse, mostly night shifts.", "nurse"),
+                ("The report is due March 3rd, hard deadline.", "march"),
+                ("We track tasks in Trello.", "trello")):
+            knots = extract(statement)
+            self.assertTrue(knots, "dropped a plain fact: %r" % statement)
+            self.assertIn(expected, " ".join(knots).lower())
+
+    def test_roleplay_keeps_second_person(self):
+        # In a scene the other party is a character with facts of their own:
+        # "you are the vampire's sire" is exactly what the memory is for.
+        kept = extract("You live in Antwerp now.", subject="Carmine",
+                       drop_address=False)
+        self.assertTrue(kept, "roleplay lost a fact about the other character")
+        self.assertEqual(extract("You live in Antwerp now."), [],
+                         "assistant chat kept a fact about the assistant")
+
+    def test_the_filter_does_not_swallow_a_whole_turn(self):
+        # A turn that mixes a question with a statement keeps the statement.
+        knots = extract("Do you like it here? I'm based in Utrecht, "
+                        "near the old canal.")
+        self.assertTrue(knots)
+        self.assertIn("utrecht", " ".join(knots).lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2 if "-v" in sys.argv else 1)
