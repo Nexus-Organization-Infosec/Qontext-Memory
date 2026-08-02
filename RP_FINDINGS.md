@@ -575,3 +575,155 @@ worth **2.4%** of pack budget and is not worth doing.
 
 But the measurement printed a pack, and the pack was full of questions. The
 idea was wrong and the test it motivated found something twenty times larger.
+
+
+# Reachable or invisible: the decomposition that reframes the problem
+
+Aggregate recall hides the mechanism. Splitting every missed fact by *why* it
+was missed turns out to change what should be built next.
+
+For each fact the next reply demonstrably needed, and which recency could not
+have supplied, ask where it was when the pack was built (5 logs, budget 1200,
+`diagnose_misses.py`):
+
+| | count | share |
+|---|---|---|
+| carried by the pack | 30 | 5.3% |
+| ranked, but outbid for budget | 85 | **14.9%** |
+| unreachable — score exactly zero | 454 | **79.8%** |
+
+**Four in five misses never become candidates at all.** The knot shares no
+word with the query, scores zero, and ranking never sees it. Of the minority
+that were reachable and lost, the median sat at rank 66 — not narrowly beaten,
+buried.
+
+This kills a plausible research direction. Better *discrimination* — richer
+confidence signals, score-gap triggers, entropy of the candidate distribution
+— can address at most the 15%. It cannot be the main event on this workload,
+however elegant.
+
+## The bottleneck depends on query shape, not on the memory
+
+The same memory, the same logs, two query shapes:
+
+| query shape | example | recall |
+|---|---|---|
+| quiz | "What is the vampire's name?" | 18/20 facts present, 10-12 retrievable |
+| turn | "I lean over and kiss her cheek" | 80% of needed facts unreachable |
+
+A question repeats the vocabulary of its answer. A conversational turn refers
+to a discourse entity instead of describing it — "didn't she cancel that?"
+names neither the class nor the cancellation — and lexical retrieval has
+nothing to work with. **These are two different retrieval problems wearing the
+same interface.**
+
+## What a bridge has to clear, measured on the bridge we have
+
+The right question for a semantic component is not "does accuracy improve".
+It is: *of the facts that are unreachable, how many does it reach, and what
+does that cost in candidate inflation?* Overall accuracy cannot separate a
+bridge that reaches nothing from one that reaches plenty and fuses badly.
+
+`bridge_ceiling.py`, on the same 454:
+
+| | |
+|---|---|
+| made reachable by the WikiText-103 weave | **31 (6.8%)** |
+| of those, actually reached the pack | 4 (0.9%) |
+| candidate pool per turn | 40 → 49 (1.2x) |
+
+**The weave's ceiling is 6.8%.** Even with perfect fusion and a perfect gate,
+93% of unreachable facts stay unreachable. The +2 net facts measured earlier
+was never a fusion problem.
+
+### Correction to the earlier diagnosis in this document
+
+An earlier section attributed the weave's failure to indiscriminate expansion
+flooding the candidate pool — 47 association tokens per turn. The pool grows
+by **1.2x**, so that was wrong. The expansion is wide in vocabulary and narrow
+in effect: those 47 tokens mostly expand to words that appear in no stored
+knot at all.
+
+The reason is the *direction* of the association. PPMI learns
+`class → teacher, lesson, school` — words that share a situation. The hop
+actually required is `cancelled → planned activity → class`, which is
+reference resolution, not co-occurrence. Counting will not produce it at any
+corpus size.
+
+## The bar for the next experiment
+
+Any semantic retriever should be judged first on one number:
+
+> **What fraction of the 454 unreachable facts does it make reachable,
+> without touching supersession?**
+
+Above roughly 40%, bridges are the right category and fusion becomes worth
+engineering. Around 10%, discourse-shaped reference is not a retrieval problem
+and the search should move elsewhere. The weave sits at 6.8%, which is the
+number to beat.
+
+Supersession stays symbolic regardless. "Alice is at the tavern" and "Bob is
+at the tavern" are near-identical in any embedding space and must never merge;
+the 27/27 safety suite exists to catch exactly that, and cosine similarity
+would walk straight through it.
+
+## The bar, tested: embeddings tie the weave at matched cost
+
+`embed_bridge.py`, same 454 unreachable facts, same protocol. A bridge
+proposes K entry points per query, so K is also its price — the candidate pool
+grows by K whether or not any of them is right.
+
+| bridge | reached | cost per turn |
+|---|---|---|
+| WikiText-103 weave, ~6 terms | 31 (6.8%) | +9 candidates |
+| embeddings, top-5 | 15 (3.3%) | +5 |
+| embeddings, top-10 | 34 (**7.5%**) | +10 |
+| embeddings, top-20 | 78 (17.2%) | +20 |
+| embeddings, top-50 | 201 (**44.3%**) | +50 |
+
+**At matched cost the embedding bridge ties the co-occurrence weave**: 7.5%
+against 6.8% for the same ten extra candidates. The 40% target only arrives at
+top-50, which more than doubles a lexical pool averaging 40 knots per turn.
+
+The signal is real rather than noise — top-20 reaches 17.2% where random
+selection from ~500 knots would give roughly 4%, so about four times chance.
+It simply does not *concentrate*. The right fact is somewhere in the top fifty
+and rarely in the top ten.
+
+The motivating probe still holds, which is what makes this interesting rather
+than merely negative:
+
+```
+"didn't she cancel that?"  vs  "didn't you have class though?"   0.352
+"didn't she cancel that?"  vs  "the user is at the harbour"      0.042
+```
+
+An order of magnitude apart. The mechanism exists. It is the *ranking* of that
+mechanism across five hundred candidates that fails to isolate the answer.
+
+### Three things this does not establish
+
+**It is a lower bound.** `potion-base-8M` is a static distilled model — no
+context window, effectively a well-trained bag of word vectors. A contextual
+sentence encoder should score higher, and testing one is the obvious next
+step: change `MODEL` and swap `StaticModel.from_pretrained` for
+`SentenceTransformer`.
+
+**Reach is not retrieval.** This counts whether a fact enters the top-K, not
+whether it survives ranking and packing afterwards. The weave lost six of
+every seven facts it rescued at that stage, and there is no reason to assume
+embeddings would do better.
+
+**One workload.** Five roleplay logs, turn-shaped queries. On quiz-shaped
+questions reachability was never the problem.
+
+### Where that leaves the design
+
+Neither bridge earns a place in the default path on this evidence. Both remain
+optional and off. What has changed is that the question is now precise and
+cheap to re-ask: any future retriever gets pointed at `bridge_ceiling.py` and
+`embed_bridge.py` and has to beat **6.8% at +10 candidates**, on the
+population that actually needs rescuing, before anyone argues about fusion.
+
+That is the useful residue of a negative result — not "semantics did not
+help", but a protocol, a population, and a number.
