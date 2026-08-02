@@ -81,6 +81,22 @@ REFERENCE_LENGTH = 40       # knots under this length are not penalised
 # chained possessive moves the subject elsewhere: "the user's neighbour's dog"
 # is the neighbour's dog, however many times it says "user".
 SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
+
+# Hidden index terms: words from the turn a knot came from, used for matching
+# and never shown to the model.
+#
+# Measured on real logs: of the facts a reply needed and retrieval could not
+# reach, 44.5% had a bridging word in the very turn that produced the knot.
+# Extraction discarded it. Three semantic bridges rescue ~7% of the same
+# population, so this is a six-fold larger opportunity.
+#
+# It does not trade against design rules 2 and 3, because index terms are not
+# display text: the pack stays short while the knot becomes reachable through
+# words nobody has to read. Storage grows, the prompt does not.
+#
+# 0 disables the mechanism entirely.
+INDEX_TERMS = 0             # hidden terms kept per knot
+INDEX_WEIGHT = 0.35         # their score relative to a word in the knot itself
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 
 # --------------------------------------------------------------------------
@@ -981,7 +997,8 @@ class QontextMemory:
                 return []      # assistant chatter never carries new facts
             else:
                 subject = name   # roleplay: this speaker is their own subject
-            return [k for k in extract(text, subject) if self._add(k)]
+            return [k for k in extract(text, subject)
+                    if self._add(k, context=text)]
 
     def add(self, knot):
         """Store a fact directly, bypassing extraction. Returns True if new."""
@@ -1040,7 +1057,20 @@ class QontextMemory:
         return (max([k["hits"] for k in doomed] + [0]),
                 sum(1 + k.get("reinforced", 0) for k in doomed))
 
-    def _add(self, knot):
+    def _index_terms(self, knot_words, context):
+        """Distinctive words from the source turn that the knot itself lost.
+
+        Rarest first, by the document frequency the memory has seen so far —
+        a word shared with hundreds of knots is not a useful entry point, and
+        a word appearing here for the first time usually is.
+        """
+        if not INDEX_TERMS or not context:
+            return frozenset()
+        spare = [w for w in dict.fromkeys(_words(context)) if w not in knot_words]
+        spare.sort(key=lambda t: len(self._index.get(t) or ()))
+        return frozenset(spare[:INDEX_TERMS])
+
+    def _add(self, knot, context=None):
         """Insert one knot. Caller holds the lock."""
         if knot in self._seen:
             return False
@@ -1054,7 +1084,11 @@ class QontextMemory:
         record = {"text": knot, "seq": self._seq, "hits": inherited,
                   "ts": time.time(), "w": words, "f": frame,
                   "ids": _identifiers(frame), "reinforced": reinforced,
-                  "imp": _importance(knot, reinforced, inherited)}
+                  "imp": _importance(knot, reinforced, inherited),
+                  # Matching only. Never rendered, never part of supersession:
+                  # two knots that merely came from similar turns are not the
+                  # same fact, and the 27/27 safety suite depends on that.
+                  "idx": self._index_terms(words, context)}
         self._knots.append(record)
         self._seen.add(knot)
         self._index_add(record)
@@ -1067,14 +1101,14 @@ class QontextMemory:
 
     def _index_add(self, record):
         self._by_seq[record["seq"]] = record
-        for token in record["w"]:
+        for token in record["w"] | record.get("idx", frozenset()):
             self._index.setdefault(token, set()).add(record["seq"])
         if record.get("f"):
             self._by_frame.setdefault(record["f"], []).append(record)
 
     def _index_remove(self, record):
         self._by_seq.pop(record["seq"], None)
-        for token in record["w"]:
+        for token in record["w"] | record.get("idx", frozenset()):
             bucket = self._index.get(token)
             if bucket is not None:
                 bucket.discard(record["seq"])
@@ -1225,6 +1259,10 @@ class QontextMemory:
     def _score(self, record, expanded, about_user, weights):
         matched = expanded & record["w"]
         overlap = sum(weights[t] for t in matched)
+        # A word that was near the knot is weaker evidence than a word in it.
+        hidden = (expanded & record.get("idx", frozenset())) - matched
+        if hidden:
+            overlap += INDEX_WEIGHT * sum(weights[t] for t in hidden)
         if overlap and about_user and SUBJECT_FOCUS:
             text = record["text"].lower()
             first_party = (("the user" in text or "the team" in text)

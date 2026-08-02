@@ -778,3 +778,113 @@ tried so far reaches them affordably. The reserved slice (`PACK_RESERVE`) is
 the only thing that has ever helped, and it works by *ignoring the query
 entirely* — which, in hindsight, is the same insight arriving from the other
 direction: if the turn is a poor question, stop asking it.
+
+
+# The information was there at write time, and extraction threw it away
+
+Three retrieval bridges converge at ~7%. The obvious redirect is to fix it
+earlier — store a representation that carries the bridge, so no clever
+retriever is needed. That relocates the problem rather than dissolving it,
+since inferring "cancelled" from "didn't you have class though?" needs the
+same discourse understanding the retriever lacked.
+
+But it relocates it somewhere *better*, and the reason is an asymmetry worth
+stating plainly: **the surrounding turns exist when the knot is written and
+are gone when the question is asked.** Whether that helps is measurable
+without any model — `write_time_oracle.py` asks whether the future query
+shares a content word with the neighbourhood of the turn that produced the
+knot.
+
+| context around the knot's source turn | query shares a word |
+|---|---|
+| the source turn only | **202 / 454 (44.5%)** |
+| ± 1 turn | 252 (55.5%) |
+| ± 2 turns | 324 (71.4%) |
+| ± 4 turns | 379 (83.5%) |
+
+**In 44.5% of unreachable cases the bridging word was in the very turn the
+knot came from.** Not latent, not inferred — present in the text, at the
+moment of writing, and discarded by extraction. Against 7.7% for the best
+retrieval bridge, that is a six-fold larger population.
+
+It also explains a pattern nobody had joined up. Every improvement this
+project ever measured as a win was an extraction change: state-as-payload
+(4.1% → 6.3%), speaker-aware subjects (8/20 → 10/20), the question filter
+(40% fewer knots, junk halved). Retrieval changes have produced ties or
+losses. We kept finding gains in extraction and treating them as incidental
+housekeeping.
+
+## The tension this creates, which is real
+
+The obvious fix is to keep more of the source turn's vocabulary in the knot.
+Design rules 2 and 3 say the opposite — *the payload is the point*, *fewer,
+better knots* — and they were each paid for with a failed run. Fatten every
+knot with context words and the pack spends budget on vocabulary that exists
+only to be searchable, which is exactly the noise the density rules prevent.
+
+The resolution is that these are two different jobs wearing one field:
+
+> **Index terms are not display text.**
+
+A knot can carry a hidden term set — distinctive words from its source turn —
+used only for matching and never sent to the model. The pack stays a hundred
+tokens of clean third-person facts; reachability comes from words nobody has
+to read. Storage grows, the prompt does not.
+
+That is the first candidate in this whole line of work that needs no
+dependency, targets the 44.5% population rather than the 7.7% one, and does
+not trade against the design rules.
+
+## Built it. It does not work either, and the reason matters.
+
+`INDEX_TERMS` adds hidden matching terms to every knot: the most distinctive
+words from its source turn, indexed for retrieval and never rendered into the
+pack. Rarest-first by document frequency, discounted at `INDEX_WEIGHT` when
+scoring, excluded from supersession and from the frame.
+
+| terms per knot | turnbench @300 | @1200 |
+|---|---|---|
+| 0 (off) | 1.8% | 3.8% |
+| 3 | 1.8% | 3.5% |
+| 6 | 1.7% | 3.4% |
+| 10 | 2.2% | 4.3% |
+| 16 | 1.9% | 3.9% |
+
+Chat suites A, B and C are unchanged at every setting, so it costs nothing.
+It also buys nothing: worse than off at 3 and 6, better at 10, back down at
+16. Non-monotonic across four settings is the shape of noise, not of a
+mechanism with an optimum.
+
+### Why the 44.5% did not convert
+
+The oracle measured **availability** — was a bridging word present near the
+knot when it was written. It did not measure **discrimination**, and those
+come apart completely, because *every* knot gets index terms. The same words
+that make the right knot reachable make dozens of wrong ones reachable at the
+same time. Reachability is not scarce once you are willing to index anything;
+what is scarce is a reason to prefer one reachable knot over another.
+
+That is precisely the weave's failure arriving from the opposite direction.
+The weave broadened the query; index terms broaden the knots. Both raise
+recall of a pool that was never the constraint, and neither improves the
+choice among what is retrieved.
+
+**Kept, off by default (`INDEX_TERMS = 0`).** The mechanism is sound, tested,
+costs nothing when disabled, and is there for anyone who finds a workload
+where reachability genuinely is the binding constraint. On turn-shaped
+roleplay retrieval it is not.
+
+### What five negative results in a row actually establish
+
+PPMI expansion, static embeddings, contextual embeddings, cord expansion, and
+now write-time index terms. Five mechanisms, three of them semantic, two of
+them structural, all landing within noise of the baseline.
+
+The one thing that has ever moved this metric is `PACK_RESERVE` — filling half
+the pack by importance and **ignoring the query entirely**. That is not a
+retrieval improvement. It is a decision to stop treating the turn as a query.
+
+Read together, the evidence says: for turn-shaped input, the question "which
+stored fact is relevant to this text?" may not be answerable from the text.
+Every attempt to answer it better has failed identically. The approach that
+works declines to ask.
