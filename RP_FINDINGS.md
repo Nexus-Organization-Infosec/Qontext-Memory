@@ -1005,3 +1005,45 @@ sizes, the mechanism is not what this section says it is, and the honest
 conclusion becomes "a constant that happened to help on eleven logs".
 
 Written down before measuring, so it cannot be reinterpreted afterwards.
+
+## The falsification test was underpowered, and that is the result
+
+`size_scaling.py` truncates each log to a prefix and replays it, comparing
+index terms on and off at several memory sizes.
+
+| turns | knots/log | needed facts | off | on | gap |
+|---|---|---|---|---|---|
+| 60 | 157 | 777 | 4.9% | 5.4% | +0.5 |
+| 150 | 204 | 1,284 | 5.4% | 5.6% | +0.2 |
+| 300 | 204 | 1,289 | 5.4% | 5.6% | +0.2 |
+| 600 | 204 | 1,289 | 5.4% | 5.6% | +0.2 |
+| all | 204 | 1,289 | 5.4% | 5.6% | +0.2 |
+
+The gap is flat, which is the falsifier. But the last four rows are
+**identical**, and that is the tell: the longest log is 151 turns and the
+median is 49, so truncating at 300, 600 or "all" truncates nothing.
+
+The genuine range tested is **157 knots against 204**. At a 2% document
+frequency ceiling that is a threshold of 3 versus 4 — the mechanism barely
+differs between the two conditions being compared. A flat gap across that span
+is what you would observe whether the account is right or wrong.
+
+**So the prediction is untested, not refuted.** The corpus cannot test it: RP
+logs are two orders of magnitude too short for a claim about how a
+corpus-level statistic behaves as a corpus grows.
+
+That distinction matters more than the outcome would have. A flat line from a
+test that could not have shown a slope is not evidence of flatness — and
+reporting it as a falsification would have been the same error as every
+harness bug in this project, one level up: mistaking a property of the
+instrument for a property of the thing.
+
+**What would test it:** synthetic conversations at 100 / 400 / 1,600 / 6,400
+turns with turn-shaped queries, spanning 50 to 3,000 knots. `long_bench.py`
+already generates conversations at those lengths with real dialogue filler;
+what it lacks is turn-shaped ground truth, which `rp_turnbench.py` derives from
+a character's next reply. Joining the two is a day's work and would settle it.
+
+Until then the honest status of dual representation is: **a mechanism with a
+plausible account, one point of directional evidence across eleven logs, and a
+prediction nobody has been able to test.**
