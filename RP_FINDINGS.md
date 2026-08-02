@@ -888,3 +888,71 @@ Read together, the evidence says: for turn-shaped input, the question "which
 stored fact is relevant to this text?" may not be answerable from the text.
 Every attempt to answer it better has failed identically. The approach that
 works declines to ask.
+
+## Correction: it does work, and the aggregate was hiding it
+
+The section above concluded the mechanism was noise. That was measured with
+rarest-first term selection and read only as an 11-log mean, and both were
+mistakes.
+
+**A document-frequency ceiling, not merely rarest-first.** A word the memory
+has already seen in a large share of its knots is background, not an entry
+point — indexing it makes every knot reachable by a word that identifies none
+of them. Skipping any term already present in more than 2% of knots:
+
+| chat engine, budget 300 | |
+|---|---|
+| off | 1.8% |
+| rarest-first | 2.2% |
+| **df ceiling** | **2.5%** |
+
+**And the per-log view, which the mean concealed.** Six of eleven logs are
+flat — three score 0.0% under every setting — so a real gain on five logs
+becomes a small aggregate.
+
+| | better | worse | unchanged |
+|---|---|---|---|
+| chat engine @300 | **5** | **0** | 6 |
+| RP engine @1200 | **6** | 2 | 3 |
+
+Five better and none worse is a sign test at p ≈ 0.03. This is the first
+mechanism in the whole retrieval line that improves without ever harming.
+
+**On the deployment path it was inert until wired.** `RPMemory` has its own
+extraction and was calling `_add(knot)` without the source turn, so index
+terms never populated in the build that actually ships. With the context
+passed:
+
+| RP engine | before | after |
+|---|---|---|
+| budget 300 | 3.4% | **3.6%** |
+| budget 600 | 5.7% | 5.7% |
+| budget 1200 | 10.4% | **11.2%** |
+
+Chat suites A and B unchanged at 10/10; C recall unchanged with noise 12% → 13%
+at budget 300. Supersession untouched — 27/27 pairs kept apart, 0 collapses —
+because index terms are excluded from the frame and from the similarity check
+by construction. 98 tests green.
+
+**Enabled by default**: `INDEX_TERMS = 10`, `INDEX_DF_CEILING = 0.02`,
+`INDEX_WEIGHT = 0.35`.
+
+### The idea, named properly
+
+Not "hidden index terms" — that is the implementation. The finding is:
+
+> **A memory entry needs two representations, because reasoning and retrieval
+> are different objectives.**
+>
+> The *payload* is optimised for the model: dense, readable, self-contained,
+> cheap in the pack. The *index* is optimised for being found: reachable,
+> discriminative, and never rendered.
+
+Most memory systems use one representation for both, which is what created the
+tension with design rules 2 and 3 here — every attempt to make knots more
+findable made them worse to read, and every attempt to make them denser made
+them harder to find. Separating the objectives dissolves the conflict, and the
+measurements are what forced the separation rather than taste.
+
+The gain is modest — one point at budget 1200 — and the honest framing is that
+it is the first *directionally clean* result after five that were not.

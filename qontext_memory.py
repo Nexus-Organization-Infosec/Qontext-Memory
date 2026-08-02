@@ -94,9 +94,17 @@ SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
 # display text: the pack stays short while the knot becomes reachable through
 # words nobody has to read. Storage grows, the prompt does not.
 #
+# Naming, because it is the general idea rather than the trick: a knot has two
+# representations with different objectives. The *payload* is optimised for
+# reasoning — dense, readable, cheap in the pack. The *index* is optimised for
+# retrieval — reachable, discriminative, never rendered. Most memory systems
+# use one representation for both jobs, which is what created the tension with
+# design rules 2 and 3 here.
+#
 # 0 disables the mechanism entirely.
-INDEX_TERMS = 0             # hidden terms kept per knot
+INDEX_TERMS = 10            # hidden terms kept per knot
 INDEX_WEIGHT = 0.35         # their score relative to a word in the knot itself
+INDEX_DF_CEILING = 0.02     # skip words already in this share of knots
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 
 # --------------------------------------------------------------------------
@@ -1066,7 +1074,16 @@ class QontextMemory:
         """
         if not INDEX_TERMS or not context:
             return frozenset()
-        spare = [w for w in dict.fromkeys(_words(context)) if w not in knot_words]
+        # A document-frequency ceiling, not merely rarest-first. A word the
+        # memory has already seen in a large share of its knots is background,
+        # not an entry point, and indexing it makes every knot reachable by a
+        # word that identifies none of them. Measured: rarest-first alone gave
+        # 2.2%, the ceiling 2.5%, and per-log the ceiling improved 5 of 11 logs
+        # while harming none.
+        ceiling = max(3, int(INDEX_DF_CEILING * len(self._knots)))
+        spare = [w for w in dict.fromkeys(_words(context))
+                 if w not in knot_words and len(w) >= 4
+                 and len(self._index.get(w) or ()) <= ceiling]
         spare.sort(key=lambda t: len(self._index.get(t) or ()))
         return frozenset(spare[:INDEX_TERMS])
 

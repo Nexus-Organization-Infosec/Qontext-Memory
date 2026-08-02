@@ -259,13 +259,13 @@ class RPMemory(CordMemory):
             subject = "the user" if name.lower() in ("user", "you") else name
             added = []
             for knot in rp_extract(text, subject, self.known):
-                if self._add(knot):
+                if self._add(knot, context=text):
                     added.append(knot)
             # Dialogue is attributed separately: extract() has no concept of
             # who is speaking inside a quotation, and an unattributed line is
             # a knot tied around nothing.
             for knot in self._dialogue_knots(subject, text):
-                if self._add(knot):
+                if self._add(knot, context=text):
                     added.append(knot)
         self.tie_turn(before)
         return added
