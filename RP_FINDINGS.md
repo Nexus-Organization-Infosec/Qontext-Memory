@@ -727,3 +727,54 @@ population that actually needs rescuing, before anyone argues about fusion.
 
 That is the useful residue of a negative result — not "semantics did not
 help", but a protocol, a population, and a number.
+
+### Contextual embeddings do not beat a bag of word vectors
+
+The static result was published as a lower bound, on the reasoning that a real
+sentence encoder should do better. It does not.
+
+`all-MiniLM-L6-v2`, same 454 facts, same protocol, run on the author's
+machine:
+
+| K | potion-base-8M (static) | all-MiniLM-L6-v2 (contextual) |
+|---|---|---|
+| 5 | 3.3% | 4.4% |
+| **10** | **7.5%** | **7.7%** |
+| 20 | 17.2% | 18.3% |
+| 50 | 44.3% | 47.6% |
+
+**Two-tenths of a point at matched cost.** A model with a context window,
+trained on sentence pairs, scores the same as one that averages static word
+vectors — and both sit within a point of a co-occurrence count over
+WikiText-103.
+
+Three methods that share nothing in their construction, landing in the same
+place, is not a sequence of implementation failures. **The ceiling is in the
+formulation.**
+
+The reason is visible once stated. All three ask the same question: *which
+stored fact is most similar to this turn?* But a roleplay turn is similar to
+dozens of scene knots at once, and the fact the reply needs is rarely the most
+similar one. The relation required is *"which fact does what I am about to say
+depend on"* — relevance to an unwritten continuation — and that is not
+similarity between two strings. No encoder computes it because it is not a
+property of the pair.
+
+### Verdict, against a threshold set before the measurement
+
+Written down before the run: above roughly 25-30% at top-10, bridges are worth
+engineering; near 9%, the category is a dead end for this task. The result is
+**7.7%**.
+
+So: **semantic retrieval is not the answer to discourse-shaped reference**, and
+this project has now spent three separate mechanisms establishing it. The
+weave stays off. No embedding dependency is added. `qontext_memory.py` remains
+stdlib-only, and that is now an evidenced decision rather than an aesthetic
+preference.
+
+What remains unsolved is stated plainly rather than hidden: on turn-shaped
+queries, roughly 80% of the facts a reply needs are unreachable, and nothing
+tried so far reaches them affordably. The reserved slice (`PACK_RESERVE`) is
+the only thing that has ever helped, and it works by *ignoring the query
+entirely* — which, in hindsight, is the same insight arriving from the other
+direction: if the turn is a poor question, stop asking it.

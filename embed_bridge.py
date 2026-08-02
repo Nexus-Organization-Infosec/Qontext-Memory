@@ -17,13 +17,20 @@ A bridge proposes K entry points per query, so K is also its cost: the pool
 grows by K whether or not any of them is right. Reporting reach at several K
 keeps the trade visible instead of tuning it away.
 
-    pip install model2vec
+    pip install model2vec                       # static, no torch
     python embed_bridge.py
+
+    pip install sentence-transformers           # contextual, needs torch
+    python embed_bridge.py --model sentence-transformers/all-MiniLM-L6-v2
+
+The backend is chosen from the model name unless --backend says otherwise, and
+the log directory is found automatically if it sits somewhere obvious.
 
 Note what this deliberately does NOT do: touch supersession. "Alice is at the
 tavern" and "Bob is at the tavern" are near-identical in any embedding space
 and must never merge. Retrieval only.
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -40,32 +47,96 @@ from rp_turnbench import content_words, needed_knots, RECENCY_WINDOW  # noqa: E4
 MODEL = "minishlab/potion-base-8M"
 TOPK = (5, 10, 20, 50)
 LOGS = ("log13.txt", "log1.txt", "log5.txt", "log2.txt", "log6.txt")
-ROOT = Path("/sessions/admiring-sharp-keller/mnt/RP_Logs")
+
+# Excluded from every roleplay measurement after a content screen.
+EXCLUDED = {"log8.txt", "log12.txt"}
+
+# Where the logs might be. Tried in order; first hit wins.
+CANDIDATE_ROOTS = (
+    Path(r"C:\Users\hylke\Documents\RP_Logs"),
+    Path.home() / "Documents" / "RP_Logs",
+    Path("/sessions/admiring-sharp-keller/mnt/RP_Logs"),
+    Path(__file__).resolve().parent.parent / "RP_Logs",
+)
 
 
-def main():
-    from model2vec import StaticModel
+def find_logs(given):
+    if given:
+        return Path(given)
+    for root in CANDIDATE_ROOTS:
+        if root.is_dir():
+            return root
+    raise SystemExit("Could not find the log directory. Pass --logs PATH.")
+
+
+def encoder(name, backend):
+    """Returns embed(texts) -> normalised matrix, for either backend.
+
+    Static models (model2vec) need no torch and have no context window, so
+    they are a lower bound. A sentence-transformer is the real test.
+    """
     import numpy as np
 
-    model = StaticModel.from_pretrained(MODEL)
+    if backend == "auto":
+        backend = "static" if name.startswith("minishlab/") else "sentence"
+
+    if backend == "static":
+        from model2vec import StaticModel
+        model = StaticModel.from_pretrained(name)
+
+        def raw(texts):
+            return model.encode(texts)
+    else:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer(name)
+
+        def raw(texts):
+            return model.encode(texts, batch_size=128,
+                                show_progress_bar=False)
+
     cache = {}
 
     def embed(texts):
         fresh = [t for t in texts if t not in cache]
         if fresh:
-            vectors = model.encode(fresh)
+            vectors = np.asarray(raw(fresh), dtype="float32")
             vectors = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True)
                                  + 1e-9)
             for text, vector in zip(fresh, vectors):
                 cache[text] = vector
         return np.stack([cache[t] for t in texts])
 
+    return embed, backend
+
+
+def main():
+    import numpy as np
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--backend", choices=("auto", "static", "sentence"),
+                    default="auto")
+    ap.add_argument("--logs", help="directory of roleplay logs")
+    ap.add_argument("--topk", default=",".join(str(k) for k in TOPK))
+    args = ap.parse_args()
+
+    root = find_logs(args.logs)
+    topk = tuple(int(k) for k in args.topk.split(",") if k.strip())
+    embed, backend = encoder(args.model, args.backend)
+    print("logs:    %s" % root)
+    print("model:   %s  (%s backend)" % (args.model, backend))
+
+    names = [n for n in LOGS if n not in EXCLUDED
+             and (root / n).is_file()]
+    if not names:
+        raise SystemExit("No usable logs in %s" % root)
+
     unreachable = 0
-    reached = {k: 0 for k in TOPK}
+    reached = {k: 0 for k in topk}
     turns_counted = 0
 
-    for name in LOGS:
-        turns = load(ROOT / name)
+    for name in names:
+        turns = load(root / name)
         mem = qm.QontextMemory(max_entries=10 ** 6, speakers="all")
         for i, (speaker, is_user, text) in enumerate(turns):
             reply = turns[i + 1][2] if i + 1 < len(turns) else None
@@ -84,7 +155,7 @@ def main():
                         query = embed([text])[0]
                         scores = matrix @ query
                         order = np.argsort(-scores)
-                        for k in TOPK:
+                        for k in topk:
                             top = {knots[j] for j in order[:k]}
                             reached[k] += len(set(missing) & top)
                         unreachable += len(missing)
@@ -95,7 +166,7 @@ def main():
     print("\n  bridge            reached      cost (extra candidates/turn)")
     print("  %-16s %4d (%4.1f%%)   %s"
           % ("weave, ~6 terms", 31, 100.0 * 31 / max(1, unreachable), "+9"))
-    for k in TOPK:
+    for k in topk:
         print("  %-16s %4d (%4.1f%%)   +%d"
               % ("embeddings top-%d" % k, reached[k],
                  100.0 * reached[k] / max(1, unreachable), k))
