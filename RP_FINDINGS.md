@@ -956,3 +956,52 @@ measurements are what forced the separation rather than taste.
 
 The gain is modest — one point at budget 1200 — and the honest framing is that
 it is the first *directionally clean* result after five that were not.
+
+
+# The arc, and what it does not establish
+
+| hypothesis | prediction | result | conclusion |
+|---|---|---|---|
+| tuning fixes retrieval | stronger constants raise recall | flat response surface | not the bottleneck |
+| statistical bridge | rescues many zero-score facts | 6.8% ceiling | wrong bridge |
+| contextual embeddings | ≥25-30% rescue | 7.7% | similarity is not the missing information |
+| preserve source vocabulary | large oracle | 44.5% available | extraction is where information is lost |
+| dual representation + DF ceiling | recover some of it cheaply | +0.8 pts, 5-0 per-log | architecture, not retrieval |
+
+Five hypotheses, four eliminated, each by a measurement designed to be capable
+of killing it.
+
+## The caveats, stated at the same volume as the claim
+
+**The gain is one point.** RP turnbench at budget 1200: 10.4% → 11.2%. The
+sign test is clean (5 better, 0 worse on the chat engine) but n is eleven logs
+with six of them flat. This is a directional result, not an effect size anyone
+should quote.
+
+**It captures a small share of what the oracle promised.** The oracle said the
+bridging word was available in 44.5% of unreachable cases. The implementation
+converts roughly one point of the ~7 available at that budget. Either the
+mechanism is weak or the oracle overstates what "available" is worth — and the
+whole point of the earlier `INDEX_TERMS` failure was that those are different
+things. Availability is not usability, and we have now demonstrated that twice.
+
+**It has never been near a model.** Every number in this section is
+containment: did the knot enter the pack. Whether a model answers better with
+it is unmeasured.
+
+**One extraction pipeline, one corpus, one machine.** The principle is stated
+as though it generalises. Nothing here shows that it does.
+
+## The falsifiable version
+
+If the dual-representation account is right rather than a lucky constant, it
+predicts something specific: **the benefit should grow with memory size.** A
+document-frequency ceiling can only matter once there are enough knots for
+background words to become background — in a 20-knot memory nothing is common,
+so the ceiling never binds and index terms should behave like rarest-first.
+
+That is a real prediction and it could fail. If the gain is flat across memory
+sizes, the mechanism is not what this section says it is, and the honest
+conclusion becomes "a constant that happened to help on eleven logs".
+
+Written down before measuring, so it cannot be reinterpreted afterwards.
