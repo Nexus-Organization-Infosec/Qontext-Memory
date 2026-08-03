@@ -1658,3 +1658,69 @@ measurement**, and this is the first evidence it is partly wrong.
 
 `script` is 0/8 on B and 1/5 on A — the hardest category for every mechanism
 tried so far, and the one worth attacking next.
+
+---
+
+# The contextual encoder was supposed to be the cheap win. It wasn't.
+
+Prediction on record before the run: model2vec is a *static* model — a bag of
+well-trained word vectors with no context window, chosen deliberately as a
+lower bound. A real contextual sentence encoder should beat it.
+
+| arm | A (tuned-on) | B (HELD OUT) | control |
+|---|---|---|---|
+| baseline (lexical) | 4/28 (14%) | 8/38 (21%) | 6.9× / 12.8× |
+| static (model2vec, 30 MB) | 12/28 (43%) | 16/38 (42%) | 6.2× / 19.2× |
+| contextual (MiniLM, 88 MB) | 12/28 (43%) | **17/38 (45%)** | 5.7× / 10.7× |
+
+**Identical on A, one item better on B.** One item in 38 is inside noise, and
+MiniLM's control is *worse* on both suites (5.7× against 6.2×, 10.7× against
+19.2×), meaning it also pulls in slightly more knots that match arbitrary
+keys. The prediction failed.
+
+Per gap kind on B the two are the same everywhere except hypernym, 4/8 → 5/8.
+
+## What that tells us about the task
+
+A contextual encoder's advantage over a bag of vectors is *composition* —
+word order, negation, syntactic scope. These gaps do not need it. `seafood →
+shellfish`, `Rioja → pregnant`, `couscous → gluten` are word-level
+relatedness; the sentences around them are short and carry little structure
+worth composing.
+
+So the useful conclusion is practical and slightly deflationary: **use the
+static model.** Three times smaller, no onnxruntime, no torch, and it does the
+same job. The 88 MB buys one item.
+
+## Note on getting MiniLM at all
+
+`sentence-transformers` pulls a 526 MB torch wheel that stalled repeatedly
+here, and `download.pytorch.org` is unreachable from this sandbox. Running the
+same weights through their ONNX export (88 MB, `onnxruntime` + `tokenizers`)
+gives the identical model with a different runtime — mean pooling over token
+states then L2 normalise, which is what all-MiniLM-L6-v2's pooling layer does.
+Sanity check: cos(seafood turn, shellfish knot) = 0.412 against
+cos(seafood turn, Kubernetes knot) = 0.166.
+
+Worth keeping as a pattern: a transformer encoder is available in a
+dependency-light form when torch is not an option.
+
+## Where the score now stands, held out
+
+| gap | lexical | best bridge |
+|---|---|---|
+| hypernym | 0/8 | 5/8 |
+| inference | 0/6 | 4/6 |
+| reference | 6/8 | 6/8 |
+| consequence | 2/8 | 2/8 |
+| **script** | **0/8** | **0/8** |
+
+`script` is untouched by every mechanism tried: lexical, index terms,
+affordance, static and contextual embeddings all score 0/8 on B and ~1/5 on A.
+These are the gaps where the fact constrains a *situation* rather than
+resembling anything in the query — "I carry the pager every third weekend" vs
+"fancy a long hike this Saturday". Nothing in the query is semantically near
+the fact; what connects them is that one makes the other impossible.
+
+`consequence` (2/8, unmoved) is the same shape. Together that is 16 of 38
+held-out items on which no bridge has ever scored, and it is the next problem.

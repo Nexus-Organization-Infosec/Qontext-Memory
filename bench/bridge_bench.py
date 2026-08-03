@@ -95,6 +95,8 @@ def _embedder(name, backend):
 
         def raw(texts):
             return model.encode(texts)
+    elif backend == "onnx":
+        raw = _minilm_onnx()
     else:
         from sentence_transformers import SentenceTransformer
         model = SentenceTransformer(name)
@@ -134,12 +136,52 @@ def _make_embed_bridge(name, backend):
     return make
 
 
+def _minilm_onnx():
+    """MiniLM without torch.
+
+    sentence-transformers pulls a 526 MB torch wheel that stalls here, and
+    download.pytorch.org is unreachable from this sandbox. The ONNX export of
+    the same weights is 88 MB and runs on onnxruntime, so the *model* is
+    identical to what sentence-transformers would load -- only the runtime
+    differs. Mean pooling over the token states, then L2 normalise, which is
+    exactly what all-MiniLM-L6-v2's pooling layer does.
+    """
+    import numpy as np
+    import onnxruntime as ort
+    from huggingface_hub import hf_hub_download
+    from tokenizers import Tokenizer
+
+    repo = "sentence-transformers/all-MiniLM-L6-v2"
+    session = ort.InferenceSession(hf_hub_download(repo, "onnx/model.onnx"),
+                                   providers=["CPUExecutionProvider"])
+    tok = Tokenizer.from_file(hf_hub_download(repo, "tokenizer.json"))
+    tok.enable_truncation(max_length=256)
+    tok.enable_padding()
+    wanted = {i.name for i in session.get_inputs()}
+
+    def raw(texts):
+        out = []
+        for start in range(0, len(texts), 64):
+            batch = tok.encode_batch(texts[start:start + 64])
+            ids = np.array([e.ids for e in batch], dtype=np.int64)
+            mask = np.array([e.attention_mask for e in batch], dtype=np.int64)
+            feed = {"input_ids": ids, "attention_mask": mask}
+            if "token_type_ids" in wanted:
+                feed["token_type_ids"] = np.zeros_like(ids)
+            states = session.run(None, {k: v for k, v in feed.items()
+                                        if k in wanted})[0]
+            m = mask[..., None].astype("float32")
+            out.append((states * m).sum(1) / np.clip(m.sum(1), 1e-9, None))
+        return np.concatenate(out)
+
+    return raw
+
+
 # Static vectors are a deliberate LOWER BOUND: no context window, essentially
 # a well-trained bag of word vectors. A contextual encoder should do better,
 # and if it does not that is worth knowing too.
 bridge_static = _make_embed_bridge("minishlab/potion-base-8M", "static")
-bridge_minilm = _make_embed_bridge("sentence-transformers/all-MiniLM-L6-v2",
-                                   "sentence")
+bridge_minilm = _make_embed_bridge("all-MiniLM-L6-v2 (onnx)", "onnx")
 
 
 def bridge_affordance_rebuilt(mem):
