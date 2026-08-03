@@ -31,6 +31,11 @@ Everything here has a hand-written answer key.
 - **98 unit tests + supersession suite** pass.
 - **Extraction finding**: questions and second-person remarks are not facts;
   filtering them removed 47% junk.
+- **Adaptive-K bridge gate** (`bridge_classifier=qm.bridge_needs_wide`,
+  opt-in, off unless set): held-out suite B 60% real (vs 40% flat K=6),
+  control 7.5x. Caveat, not swept under the rug: suite A's control fails on
+  one of three conversation seeds (4.4x, bar is 5.0x) even with this —
+  open, unexplained, see "The next problem" below.
 
 ## What is RETRACTED
 
@@ -88,20 +93,46 @@ rebuilt over this benchmark's own vocabulary).
 
 ---
 
-## The next problem, stated precisely
+## The next problem, updated
 
-At K=30 / budget 1500 the held-out score is 68%, but the pack goes 408 → 1448
-chars and the control drops 19.2× → 5.4× (fails outright at budget 3000). So:
+Three of the four "not yet tried" ideas from the previous handoff are now
+tried. Full detail and every number in `RP_FINDINGS.md` (bottom).
 
-> The residual is **budget-bound, not reach-bound.** The correct knot for the
-> hard categories sits at median rank ~24 of 172 — reachable, just outside a
-> six-slot window.
+**Reranking the top-30 cheaply: null, and explained.** Cosine + lexical
+(Jaccard) overlap, tuned on A, confirmed on B — flat at every weight tried,
+both suites. Per-item rank data shows why: the actual hard-category targets
+share zero vocabulary with their query *by construction*, so there is no
+lexical signal in their neighbourhood to rerank with. Rules out query-side
+term weighting too (same wall).
 
-**The work is precision, not a new semantic mechanism.** Move the rank-24 knot
-to rank 5 and you buy the same items at a quarter of the cost without
-degrading the control. Not yet tried: reranking the bridge's top-30 by
-something cheap, query-side term weighting, choosing K adaptively from the
-gap-kind profile.
+**Adaptive K: ships.** A cheap rule-based classifier estimates whether
+lexical is *likely to fail* (not which gap kind it is — exact-kind
+agreement is only 7-16%, but "will lexical fail" hits 89% recall/80%
+precision on A after two rounds of fixing it against the rank data, one of
+which caught a real bug). Gates K=6/budget 800 vs K=30/budget 1500 per
+query. Result: **B 60%, control 7.5× (clears the bar, beats blanket K=30's
+own 5.4× while using little more than half the pack). A 52%, control
+4.4× — still below the 5.0× bar**, on one of three conversation seeds
+(4.9×/5.9× on the other two). Should replace flat K=6 as the bridge default
+when the bridge is enabled.
+
+**Open, not resolved:** improving the classifier (recall 56%→89%, false
+positives 3→2 on A) did not move the seed-7 control number at all — same
+4.4× before and after. That ruled out classifier accuracy as the limiting
+factor and pointed at the benchmark's own construction. Chased through two
+killed hypotheses (generic filler density — no; fact-similarity graph
+density — no, it's actually *denser* on B) to a real, measured, not-yet-
+explained asymmetry: each of A's queries lands within top-30 cosine range
+of 2.64 *other* real facts on average, B's only 2.10, despite B having 50%
+more other facts to potentially collide with. The right object to explain
+this is a query-to-fact bipartite graph, not the fact-to-fact one that was
+tried and didn't reproduce the effect. Not built — deliberately parked as
+next-cycle research, not blocking the engineering call above.
+
+**"brief" stays a documented miss**, not a chased one: "Can you walk me
+through how the caching layer works?" carries no pronoun, verb, or
+discourse marker a keyword rule can use. Left as a known limitation rather
+than patched with an ad hoc word for one item.
 
 ---
 
@@ -126,6 +157,22 @@ produced obviously wrong ones.
 
 ## Open / pending
 
+- **A/seed-7 control failure (4.4×)** — open research question, not an
+  engineering blocker. See "The next problem, updated" above and
+  `RP_FINDINGS.md` (bottom) for the full evidence chain. Next step if
+  picked back up: build the query-to-fact bipartite graph (per-query top-30
+  membership against every other fact), not another fact-to-fact graph.
+- **Adaptive K bridge wiring — done.** `qontext_memory.py` now has
+  `bridge_needs_wide()` (the wh_gated classifier) plus `bridge_classifier`,
+  `bridge_k_wide`, `bridge_budget_multiplier` on `QontextMemory`, all
+  opt-in (`bridge_classifier=None` default reproduces the old flat
+  `bridge_k` exactly). Wiring it up caught a real pre-existing bug: a
+  lexically-blind query short-circuited `pack()` before the bridge section
+  ever ran, invisible until now because no prior benchmark exercised the
+  method's own bridge path end to end. Fixed; re-verified against
+  `RP_FINDINGS.md`'s numbers exactly (A 52%/4.4x, B 60%/7.5x); 98 unit
+  tests + supersession suite + chat suites all still pass. See
+  `RP_FINDINGS.md`, "Wiring adaptive K into qontext_memory.py..."
 - **Paper v3** — not written, by decision: accumulate findings first. v2 on
   Zenodo still says the bridges are "uninterpretable, not refuted" and calls
   the similarity conjecture "reasonable". Both are now out of date — the

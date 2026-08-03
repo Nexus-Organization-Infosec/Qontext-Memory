@@ -1800,3 +1800,247 @@ run before the sentence claiming a universal negative, not after.
 
 > **A score of zero has at least two explanations: the thing is absent, or
 > your cutoff is too small. Measure the rank before naming the cause.**
+
+---
+
+# Cheap hybrid rerank of the top-30: no effect, and a clean reason why
+
+The stated problem: at K=30/budget 1500 the held-out score is 68%, but the
+control drops to 5.4x. The correct knot for `script`/`consequence` sits at
+median rank ~24 of 172 -- inside a 30-candidate pool, outside a 6-candidate
+one. Precision, not reach, was the open question: could the top-30 be
+reordered cheaply so a K=6 proposal list still catches rank-24 items?
+
+Tried: cosine similarity plus `lambda * jaccard(query_words, knot_words)`,
+reranking only within the top-30 (reach unchanged by construction), lambda
+swept 0/0.25/0.5/1.0/2.0, tuned on A, confirmed on B.
+
+**Instrument check first.** lambda=0 reproduces `bridge_bench`'s plain
+cosine arm bit for bit -- A 17/42 (40%, 6.2x), B 23/57 (40%, 19.2x) -- so the
+disable path is verified before trusting anything lambda != 0 shows.
+
+**Result: flat at every lambda tried**, both suites, both real score and
+control. Per-item rank shift explains why cleanly: the actual target items
+(suite B) -- pager (rank 23), badge (16), kosher (106), passport (26), lift
+(27), stitches (15), aws (8), banned (84) -- **never move, at any lambda**.
+These gap kinds were written to share zero vocabulary with their query, so
+their Jaccard term is 0 by construction, and so is almost every neighbor's
+in their top-30 pool -- there is no lexical signal present to rerank with.
+The only items that moved were a few already-easy ones, irrelevant to the
+problem; higher lambda moved them more without touching the target
+population.
+
+Same "no effect" shape as write-time index terms, but this time the
+per-item rank data explains the null instead of leaving it unexplained.
+Rules out query-side term weighting too -- same signal, same wall.
+
+---
+
+# Adaptive K: a classifier that estimates whether lexical will fail
+
+Reframing that unblocked the above: a gate doesn't need to identify the gap
+*kind* correctly. It only needs to estimate whether lexical retrieval is
+*likely to fail*, so the wide net (K=30/budget 1500) can be spent on the
+predicted-hard minority instead of every query.
+
+## v1 -- proposed rule-based baseline, unmodified
+
+Five buckets (NONE/HYPERNYM/SCRIPT/CONSEQUENCE/INFERENCE) from surface cues:
+pronouns, script verbs, consequence markers, hypernym nouns. Checked two
+ways before trusting it:
+
+**Exact gap-kind agreement: 7% (A), 16% (B).** Near-useless -- this
+benchmark's "inference" items (`vegan -> bechamel`) carry no pronoun, verb,
+or discourse marker at all, so a keyword rule cannot name them correctly.
+
+**Binary (predicted-wide vs actually-needs-wide, rank > 6): the number that
+matters.** A: TP=5 FP=3 TN=2 FN=4, recall 56%, precision 62%. B: TP=7 FP=2
+TN=3 FN=7, recall 50%, precision 78%. Gap-kind naming is close to useless;
+"will lexical fail" is not.
+
+End to end (K=6/budget 800 when NONE, K=30/budget 1500 otherwise, 3 seeds):
+
+| suite | score | control | avg pack |
+|---|---|---|---|
+| A (tuned-on) | 19/42 (45%) | **4.4x -- BELOW 5.0x BAR** | 900 chars |
+| B (held-out) | 34/57 (60%) | 7.5x | 870 chars |
+
+B: real gain over plain K=6 (60% vs 40%), control comfortably clears the
+bar, and beats blanket K=30 (68%/**5.4x**) on control while using little
+more than half the pack (870 vs 1448 chars). A fails the control gate.
+
+## v2 -- three changes, each kept only after checking it against this data
+
+- **`"that"` dropped from PRONOUNS.** It fired on 3 items across both
+  suites (shellfish, utrecht, penicillin) and every one was a false
+  positive -- `"that"` is doing determiner/expletive duty ("that new
+  place", "is that a long trip") far more often than true anaphora here. No
+  true positive depended on it; `"this"/"it"/"there"` each were
+  load-bearing for a real catch and stayed.
+- **`"come"` and `"found"` added to SCRIPT_VERBS.** Both are the literal
+  missing word in a real miss (vegan: "...come over"; garage: "...come and
+  collect..."; trello: "...bug I just found" -- `"found"` doesn't match the
+  original rule's `startswith("find")` prefix check at all, an irregular-verb
+  gap in the naive stemming). Checked for collisions before keeping: neither
+  word appears in any suite's correctly-NONE items.
+- **DIRECT branch added, WH-gated.** A WH-question that already names an
+  entity/possessive ("Where does Alice work?") short-circuits to "trust
+  lexical." Caught and fixed a bug before trusting it: the entity check
+  originally treated capitalised `"I"` as a named entity, which wrongly
+  demoted two already-correct catches (trello, heron) to misses. Fixed by
+  excluding `{"i","i'll","i've","i'm","i'd"}` from the entity test.
+
+Also tried and **rejected**: a `structural` DIRECT variant (proposed
+separately) firing on ANY proper noun / quoted string / number-or-date /
+possessive / two-or-more long words, no WH-gate required. Confusion matrix
+(predicted category x actual need) shows why it fails: on suite B it
+predicts DIRECT on 15 of 19 items -- it fires on almost any date or place
+name, which ordinary conversational turns are full of regardless of
+difficulty. Recall collapses to **7%** (from 50%), end-to-end score falls to
+46% (barely above the 40% plain-K=6 floor). The WH-gate is not decoration;
+removing it was tested, not assumed, and it lost.
+
+## v2 result
+
+Classifier: A recall 56%->**89%**, precision 62%->**80%** (TP=8 FP=2 TN=3
+FN=1 -- the one remaining miss is "brief," below). B: recall unchanged at
+**50%**, precision 78%->88% (TP=7 FP=1 TN=4 FN=7) -- the come/found
+additions were mined from A and, honestly, generalised to zero of B's
+misses. That's exactly the result the tune-on-A/report-on-B split exists to
+catch, not a flaw in the split.
+
+| suite | score | control | avg pack |
+|---|---|---|---|
+| A (tuned-on) | 22/42 (52%) | **4.4x -- still BELOW BAR** | 1006 chars |
+| B (held-out) | 34/57 (60%) | 7.5x | 821 chars |
+
+B is unchanged (the A-mined keyword additions didn't touch it either way).
+A's score rose (45%->52%) and precision rose (fewer wrong triggers), but
+**the worst-seed control number did not move at all** -- still exactly
+4.4x. Per-seed: 4.4x / 4.9x / 5.9x (seed 23 also slid closer to the bar
+this round, from 6.2x pre-v2).
+
+**"brief" stays a documented miss, not a chased one.** Query: "Can you walk
+me through how the caching layer works?" -- no pronoun, no script verb
+match, no consequence marker, no hypernym noun; genuinely no surface cue a
+keyword rule can use. Per the discipline of stopping once keyword coverage
+hits its obvious cases rather than growing the list indefinitely to chase
+one item, this is left as a known limitation of a rule-based gate rather
+than patched with an ad hoc word.
+
+**Verdict for shipping:** wh_gated adaptive K beats plain K=6 on real score
+on both suites, and beats blanket K=30 on control on both suites, at
+roughly half blanket K=30's pack cost. It should replace flat K=6 as the
+default bridge configuration when the bridge is enabled. It does not
+currently clear the control bar on suite A, on one of three conversation
+seeds -- see below, left open rather than papered over.
+
+---
+
+# A/seed-7: the control failure survives a much better classifier
+
+Improving the classifier (recall 56%->89%, FP 3->2 on A) should have
+widened the control margin if classifier accuracy were still the limiting
+factor. It didn't move -- 4.4x before and after. That ruled out "the
+classifier isn't good enough yet" as the explanation and pointed downstream,
+toward the benchmark's own construction. Three hypotheses tested in order,
+two of them killed:
+
+**1. Generic filler/background lexical density -- killed.** Mean pairwise
+cosine among each suite's own facts, and mean fact-to-filler cosine: A
+0.053 / 0.045, B 0.051 / 0.047. Statistically identical. "A's background
+corpus has a heavier right tail" does not hold at the aggregate level.
+
+**2. Refined to what the control actually measures.** The control checks
+whether `pack(query_i)` contains an *other real fact's* keyword -- not
+filler vocabulary. Measured, per query, how many of the suite's *other*
+real facts land inside its own top-30 cosine neighbourhood (what a widened
+bridge actually pulls in): **A averages 2.64 foreign facts per query, B
+averages 2.10** -- despite B having 19 other facts available to collide
+with against A's 13 (50% more pool, fewer actual collisions). Real,
+reproducible, and the right-shaped object (query-driven, not corpus-mean).
+
+**3. Fact-similarity graph -- did not reproduce (2), and is recorded as a
+falsified explanation, not a discarded one.** Hypothesis: suite A's facts
+form tighter clusters than B's, which would explain (2). Built the graph
+(nodes = each suite's facts, edges = cosine above threshold), swept
+threshold at four percentiles of the *pooled* distribution so neither suite
+got a friendlier cutoff:
+
+| threshold | A mean deg (norm.) | A clustering | A components | B mean deg (norm.) | B clustering | B components |
+|---|---:|---:|---:|---:|---:|---:|
+| 75th pctile | 4.11 (0.24) | 0.403 | 1 | 5.92 (0.26) | 0.340 | 1 |
+| 85th pctile | 2.00 (0.12) | 0.135 | 3 | 3.92 (0.17) | 0.210 | 1 |
+| 90th pctile | 1.44 (0.08) | 0.046 | 6 | 2.50 (0.11) | 0.160 | 3 |
+| 95th pctile | 0.89 (0.05) | 0.130 | 11 | 1.17 (0.05) | 0.000 | 11 |
+
+By normalised degree, **B is denser than A at every threshold**, and stays
+one connected component longer while A fragments earlier. Only the
+clustering coefficient favours A, and only at the loosest threshold -- it
+flips by the 85th percentile. The fact-fact graph does not reproduce the
+2.64-vs-2.10 asymmetry.
+
+**Why, and what the right object actually is:** 2.64-vs-2.10 is a
+query-to-fact relationship (each query, deliberately worded to share little
+vocabulary with its *own* target, happens to land near *other* facts) --
+not a fact-to-fact one. This benchmark's queries were hand-written
+independently of fact-fact geometry, so a fact-only graph projects the
+query distribution away and can erase the very asymmetry it's being asked
+to explain. The right object is a query-to-fact bipartite graph, or
+equivalently the per-query top-30 membership already measured in (2). Not
+built -- (2) already answers "is there an effect" (yes) and a bipartite
+graph would only sharpen "why," which is not blocking any current
+engineering decision.
+
+**Standing:** this is the evidence chain worth keeping, including the two
+rejected hypotheses -- filler density, tested and killed; fact-graph
+density, tested and killed; query-to-fact geometry, measured and real
+(2.64 vs 2.10) but not yet explained at the mechanism level. The final
+hypothesis wasn't the first plausible one; it's what remained after two
+others were checked and failed. **A/seed-7's control failure (4.4x) is
+recorded as an open, unexplained limitation of the shipped wh_gated
+adaptive-K mechanism, not resolved by this session.**
+
+> **Engineering shipped: wh_gated adaptive K, both suites' real score
+> improved, B's control clears the bar. Research parked: why A/seed-7
+> doesn't, pending a query-to-fact bipartite graph -- next cycle, not this
+> one.**
+
+---
+
+# Wiring adaptive K into qontext_memory.py surfaced a real, pre-existing bug
+
+`bridge_needs_wide()` (the wh_gated classifier, unchanged from above) and the
+K/budget gate are now in `QontextMemory` itself: `bridge_classifier=...`,
+`bridge_k_wide=30`, `bridge_budget_multiplier=1.875`, all opt-in --
+`bridge_classifier=None` (the default) reproduces the pre-existing flat
+`bridge_k` behaviour exactly.
+
+Before trusting the wiring, diffed its output against the benchmark script's
+independent reimplementation, item by item, same seed, same suite. First
+run: **2 disagreements on suite B** (`lift`, `gluten` -- both consequence/
+inference, both correctly needing the wide net). Root cause was not the
+integration, it was a latent bug in `pack()` that predates today: when a
+query matches zero knots lexically (`_ranked(query)` empty), the method
+returned a single "newest knot" fallback immediately, before the bridge
+section ever ran. That branch existed since `BRIDGE_K` was introduced and
+had never been exercised end to end -- every prior bridge benchmark
+(`bridge_bench.py`, `adaptive_k_bench.py`) reimplemented the fill loop
+*outside* `QontextMemory`, calling `mem.pack()` only for the base lexical
+slice, so this method's own internal bridge path had no test coverage
+against real data until this diff. Fixed by letting all three early-exit
+branches (empty-ranked fallback, `COVERAGE_GATE`, and the normal ranked
+fill) build `packed` and fall through to one shared bridge section and one
+return, instead of returning directly. Re-diffed: **0 disagreements**, both
+suites. Full 3-seed reproduction through the real `QontextMemory.pack()`
+call, not a bench reimplementation: **A 22/42 (52%), control 4.4x/4.9x/5.9x
+per seed; B 34/57 (60%), control 7.5x/8.5x/8.5x** -- exact match to the
+benchmarked numbers above. 98 unit tests, the supersession suite (27/27
+safety, 0/1753 invariant collapses), and the chat suites (10/10, 10/10,
+40/40) all still pass unchanged.
+
+Kept as a finding in its own right: the bug was invisible for as long as it
+was because the thing that would have caught it -- calling the real method
+end to end and diffing against an independent implementation -- had never
+been done. Two external reimplementations agreeing with each other proved
+nothing about whether the actual shipped code path worked.

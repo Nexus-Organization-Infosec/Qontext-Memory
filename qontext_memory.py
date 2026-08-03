@@ -204,6 +204,99 @@ COVERAGE_GATE = 0.0
 # dependencies; see bench/bridge_bench.py for a working one in ~20 lines.
 BRIDGE_K = 6
 
+# Widened bridge_k/budget used only when bridge_classifier(query) predicts
+# lexical is likely to fail. Measured on qontext-bench/turn_bench.py, suites
+# A (tuned-on) and B (held-out), 3 conversation seeds, static model2vec
+# vectors, gated on the 5.0x shuffle control (RP_FINDINGS.md, "Adaptive K"):
+#
+#              flat K=6/budget800   flat K=30/budget1500   adaptive (this)
+#   A score          40%                14% FAILED(3.0x)      52%
+#   A control         6.2x               3.0x                 4.4x  BELOW BAR
+#   B score          40%                68%                   60%
+#   B control        19.2x               5.4x                 7.5x
+#   avg pack          ~400               1448 chars            821-1006 chars
+#
+# Blanket K=30 buys B's best score but fails A's control outright and triples
+# the pack for every query. Gating on the classifier below gets most of the
+# score at roughly half the pack cost and clears the control bar on B -- but
+# NOT on suite A, on one of three conversation seeds (4.4x, the other two
+# 4.9x/5.9x). That failure survived a classifier accuracy improvement
+# (recall 56%->89% on A) with the control number completely unmoved, so it
+# is not a classifier problem; the cause is still open (see RP_FINDINGS.md,
+# "A/seed-7: the control failure survives a much better classifier"). Ship
+# this as better than flat K=6 in expectation, not as a closed question.
+#
+# Strictly opt-in: both `bridge` and `bridge_classifier` must be supplied.
+# Passing `bridge` alone reproduces the flat-K=6 behaviour exactly, as
+# before this was added.
+BRIDGE_K_WIDE = 30
+BRIDGE_BUDGET_MULTIPLIER = 1.875     # 1500 / 800, the measured setting
+
+# A cheap classifier estimating whether lexical retrieval is likely to fail
+# for this query -- NOT which gap kind it is. Exact gap-kind agreement
+# against the written taxonomy (hypernym/script/consequence/inference) was
+# only 7-16% on turn_bench.py; reframed as a binary "will lexical need help"
+# it reaches 89% recall / 80% precision on suite A, 50%/88% on held-out
+# suite B (RP_FINDINGS.md, "Adaptive K"). Pure stdlib, so it ships in this
+# file even though the bridge itself does not.
+#
+# Each rule below was kept only after checking it against that data, not
+# assumed:
+#   - "that" is deliberately absent from _BRIDGE_PRONOUNS. It fired on 3
+#     items across both suites and every one was a false positive --
+#     determiner/expletive use ("that new place") outnumbers true anaphora
+#     here. this/it/there each cost a real catch when tried without them.
+#   - "come"/"found" are in _BRIDGE_SCRIPT_VERBS because they are the
+#     literal missing word in real misses ("...come over", "...bug I just
+#     found" -- "found" doesn't match a naive startswith("find") prefix,
+#     the point of listing it separately).
+#   - the DIRECT branch requires a WH-question AND a named entity/
+#     possessive/quote -- a plain proper noun alone was tried (no WH-gate)
+#     and its recall collapsed to 7% on suite B, firing on almost any
+#     incidental date or place name a conversational turn contains.
+#   - "i"/"i'll"/"i've"/"i'm"/"i'd" are excluded from the entity check --
+#     capitalised by English orthography, not because they name anything.
+_BRIDGE_WH = frozenset(("what", "where", "when", "who", "which", "whose"))
+_BRIDGE_PRONOUNS = frozenset(("it", "this", "they", "them", "he", "she",
+                              "him", "her", "there", "here", "one", "ones"))
+_BRIDGE_SCRIPT_VERBS = frozenset((
+    "cancel", "miss", "forget", "leave", "arrive", "return", "finish",
+    "start", "begin", "stop", "continue", "bring", "take", "drop", "lose",
+    "find", "found", "buy", "sell", "pay", "book", "come"))
+_BRIDGE_HYPERNYMS = frozenset((
+    "meeting", "appointment", "event", "place", "person", "animal", "food",
+    "drink", "vehicle", "building", "thing", "object"))
+_BRIDGE_CONSEQUENCE = frozenset((
+    "because", "why", "since", "after", "before", "therefore", "result",
+    "caused", "effect", "consequence"))
+_BRIDGE_NOT_ENTITY = frozenset(("i", "i'll", "i've", "i'm", "i'd"))
+_BRIDGE_WORD = re.compile(r"[A-Za-z']+")
+
+
+def bridge_needs_wide(query):
+    """True if lexical retrieval is predicted likely to fail on `query`.
+
+    See BRIDGE_K_WIDE above for what this gates and the measured effect,
+    good and bad, of gating on it.
+    """
+    raw = _BRIDGE_WORD.findall(_coerce(query))
+    q = [w.lower() for w in raw]
+    if q and q[0] in _BRIDGE_WH:
+        has_entity = any(w[:1].isupper() and w.lower() not in _BRIDGE_NOT_ENTITY
+                         for w in raw[1:])
+        if has_entity or "'s" in query:
+            return False           # DIRECT: already has a lexical anchor
+    if any(w in _BRIDGE_PRONOUNS for w in q):
+        return True
+    if any(w.startswith(v) for w in q for v in _BRIDGE_SCRIPT_VERBS):
+        return True
+    if any(w in _BRIDGE_CONSEQUENCE for w in q):
+        return True
+    if any(w in _BRIDGE_HYPERNYMS for w in q):
+        return True
+    return False
+
+
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 
 # --------------------------------------------------------------------------
@@ -1060,7 +1153,9 @@ class QontextMemory:
     FORMAT_VERSION = 2
 
     def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="user",
-                 weave=None, bridge=None, bridge_k=BRIDGE_K):
+                 weave=None, bridge=None, bridge_k=BRIDGE_K,
+                 bridge_classifier=None, bridge_k_wide=BRIDGE_K_WIDE,
+                 bridge_budget_multiplier=BRIDGE_BUDGET_MULTIPLIER):
         if not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive int")
         if speakers not in ("user", "all"):
@@ -1079,6 +1174,17 @@ class QontextMemory:
         # model, and this file stays dependency-free without one.
         self.bridge = bridge
         self.bridge_k = max(0, int(bridge_k))
+        # Optional adaptive gate: bridge_classifier(query) -> bool, True
+        # meaning "lexical predicted to fail, widen the bridge for this
+        # query." See BRIDGE_K_WIDE for what widening means and the
+        # measured trade. Strictly opt-in and independent of `bridge` --
+        # passing bridge alone (bridge_classifier left None) reproduces the
+        # flat bridge_k behaviour exactly, unchanged from before this
+        # existed. `bridge_needs_wide` in this file is a ready-made
+        # classifier; pass it explicitly, it is not the default.
+        self.bridge_classifier = bridge_classifier
+        self.bridge_k_wide = max(0, int(bridge_k_wide))
+        self.bridge_budget_multiplier = max(1.0, float(bridge_budget_multiplier))
         self._knots = []          # list of dicts: text, seq, hits, ts, w
         self._seen = set()        # exact-duplicate guard
         self._index = {}          # token -> {seq, ...} inverted index
@@ -1487,7 +1593,13 @@ class QontextMemory:
     def pack(self, query, budget=DEFAULT_BUDGET):
         """The densest set of relevant knots that fits in `budget` characters.
 
-        Never exceeds the budget, never raises, returns "" when empty.
+        Never exceeds the budget, never raises, returns "" when empty --
+        UNLESS both `bridge` and `bridge_classifier` are set and the
+        classifier predicts this query needs the wide net, in which case the
+        effective ceiling becomes `budget * bridge_budget_multiplier` for
+        this call only. Off by default: with `bridge_classifier=None` (the
+        default), this method's behaviour, including the hard budget
+        guarantee, is exactly what it was before this existed.
         """
         budget = max(0, int(budget))
         if not budget:
@@ -1495,6 +1607,23 @@ class QontextMemory:
         with self._lock:
             if not self._knots:
                 return ""
+
+            # Adaptive gate: decide, once, whether this query gets the wide
+            # bridge net and the wider effective budget that makes it worth
+            # having. See BRIDGE_K_WIDE for the measured trade -- this is not
+            # a free win, it is a documented one with a known open failure
+            # (RP_FINDINGS.md, suite A one-in-three-seeds control miss).
+            bridge_k = self.bridge_k
+            effective_budget = budget
+            if (self.bridge is not None and self.bridge_classifier is not None
+                    and (self.bridge_k or self.bridge_k_wide)):
+                try:
+                    wide = bool(self.bridge_classifier(query))
+                except Exception:
+                    wide = False           # a classifier must never break pack()
+                if wide:
+                    bridge_k = self.bridge_k_wide
+                    effective_budget = int(budget * self.bridge_budget_multiplier)
 
             # A reserved slice, chosen by importance and not by the query.
             #
@@ -1507,7 +1636,7 @@ class QontextMemory:
             # fraction of the budget carries them unconditionally.
             reserved, used = [], 0
             if PACK_RESERVE > 0 and len(self._knots) > 1:
-                allowance = int(budget * PACK_RESERVE)
+                allowance = int(effective_budget * PACK_RESERVE)
                 for k in sorted(self._knots,
                                 key=lambda k: (k.get("imp", 1.0), k["seq"]),
                                 reverse=True):
@@ -1520,68 +1649,86 @@ class QontextMemory:
                         break
             taken = {id(k) for k in reserved}
 
+            # `packed` is built by exactly one of the three branches below,
+            # then falls through to the bridge section unconditionally. This
+            # used to be three separate `return`s, each skipping the bridge
+            # entirely -- found by diffing this method's output against the
+            # benchmark script's external reimplementation of the same idea
+            # (RP_FINDINGS.md, "Adaptive K"): a lexically blind query (empty
+            # `ranked`, e.g. "gluten"/"lift" on suite B) hit the first
+            # early-return and the bridge never ran, silently, on exactly
+            # the queries it exists to help. That bug predates
+            # bridge_classifier -- it affected the plain bridge_k path too,
+            # just never surfaced, because every prior bridge benchmark
+            # (bridge_bench.py, adaptive_k_bench.py) reimplemented the fill
+            # loop externally instead of exercising this method's own
+            # bridge integration end to end. This was the first time it was.
+            packed = None
             ranked = self._ranked(query)
             if not ranked:
-                # nothing matched: send the newest knot rather than nothing,
-                # so the model still has some grounding
+                # nothing matched lexically: send the newest knot rather
+                # than nothing, so the model still has some grounding, but
+                # let the bridge still add to it below.
                 newest = max(self._knots, key=lambda k: k["seq"])
-                if len(newest["text"]) > budget:
-                    return ""
-                newest["hits"] += 1
-                return newest["text"]
-
-            # The query reached something, but barely. Below the gate its
-            # ordering is noise, and a noisy ordering is measurably worse than
-            # none — pack for vocabulary spread instead.
-            if COVERAGE_GATE > 0 and ranked[0][0][0] < COVERAGE_GATE:
-                out = list(reserved) + self._covering(budget, reserved, used)
+                if len(newest["text"]) <= effective_budget:
+                    newest["hits"] += 1
+                    packed = newest["text"]
+                else:
+                    packed = ""
+            elif COVERAGE_GATE > 0 and ranked[0][0][0] < COVERAGE_GATE:
+                # The query reached something, but barely. Below the gate
+                # its ordering is noise, and a noisy ordering is measurably
+                # worse than none — pack for vocabulary spread instead.
+                out = list(reserved) + self._covering(effective_budget, reserved, used)
                 if out:
                     for k in out:
                         k["hits"] += 1
-                    return "\n".join(k["text"] for k in out)
+                    packed = "\n".join(k["text"] for k in out)
 
-            # A weak match is worse than no match in a small memory: it
-            # spends budget the strong matches need. In a large one the same
-            # rule backfires — the top score is inflated by whichever long
-            # knot matched best, and half of it cuts off the answer along
-            # with the noise. Measured on a 481-knot roleplay log, dropping
-            # the floor recovers 2 of 20 facts at no cost to the small suites.
-            floor = (ranked[0][0][0] * RELEVANCE_FLOOR
-                     if len(self._knots) <= FLOOR_MAX_KNOTS else 0.0)
-            out, total = list(reserved), used
-            for score, k in ranked:
-                if score[0] < floor:
-                    break
-                if id(k) in taken:
-                    continue
-                cost = len(k["text"]) + (1 if out else 0)
-                if total + cost > budget:
-                    continue
-                out.append(k)
-                total += cost
-            for k in out:
-                k["hits"] += 1
-            packed = "\n".join(k["text"] for k in out)
+            if packed is None:
+                # A weak match is worse than no match in a small memory: it
+                # spends budget the strong matches need. In a large one the
+                # same rule backfires — the top score is inflated by
+                # whichever long knot matched best, and half of it cuts off
+                # the answer along with the noise. Measured on a 481-knot
+                # roleplay log, dropping the floor recovers 2 of 20 facts at
+                # no cost to the small suites.
+                floor = (ranked[0][0][0] * RELEVANCE_FLOOR
+                         if len(self._knots) <= FLOOR_MAX_KNOTS else 0.0)
+                out, total = list(reserved), used
+                for score, k in ranked:
+                    if score[0] < floor:
+                        break
+                    if id(k) in taken:
+                        continue
+                    cost = len(k["text"]) + (1 if out else 0)
+                    if total + cost > effective_budget:
+                        continue
+                    out.append(k)
+                    total += cost
+                for k in out:
+                    k["hits"] += 1
+                packed = "\n".join(k["text"] for k in out)
 
             # A semantic bridge fills what the ranking left, and only that.
             # It can add a fact the query had no word for; it can never
             # displace one the ranking asked for. Keeping it strictly
             # additive is what makes a failure attributable to reach.
-            if self.bridge is not None and self.bridge_k:
+            if self.bridge is not None and bridge_k:
                 total = len(packed)
                 chosen = packed.split("\n") if packed else []
                 seen = set(chosen)
                 try:
                     proposed = self.bridge(query, [k["text"] for k in
                                                    self._knots],
-                                           self.bridge_k)
+                                           bridge_k)
                 except Exception:
                     proposed = []          # a bridge must never break pack()
                 for text in proposed or []:
                     if text in seen:
                         continue
                     cost = len(text) + (1 if chosen else 0)
-                    if total + cost > budget:
+                    if total + cost > effective_budget:
                         continue
                     chosen.append(text)
                     seen.add(text)
