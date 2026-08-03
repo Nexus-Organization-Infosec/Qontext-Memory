@@ -223,6 +223,12 @@ def main():
     ap.add_argument("--out", default="affordance_web.json")
     ap.add_argument("--vocab", type=int, default=400,
                     help="how many of the commonest query words to expand")
+    ap.add_argument("--vocab-file",
+                    help="expand this word list instead of mining the logs "
+                         "(one word per line, '#' comments ignored). Used to "
+                         "give the web the vocabulary of a specific "
+                         "benchmark, so a failure is mechanism rather than "
+                         "coverage.")
     ap.add_argument("--resume", action="store_true",
                     help="keep whatever is already in --out and continue")
     ap.add_argument("--max-tokens", type=int, default=200,
@@ -233,15 +239,22 @@ def main():
                          "completion needs a base-ish model")
     args = ap.parse_args()
 
-    root = Path(args.logs)
-    if not root.is_dir():
-        for guess in (Path("/sessions/admiring-sharp-keller/mnt/RP_Logs"),
-                      Path.home() / "Documents" / "RP_Logs"):
-            if guess.is_dir():
-                root = guess
-                break
-    words = vocabulary(root, args.vocab)
-    print("logs: %s" % root)
+    if args.vocab_file:
+        source = Path(args.vocab_file)
+        words = [w.strip().lower() for w in
+                 source.read_text(encoding="utf-8").splitlines()
+                 if w.strip() and not w.startswith("#")]
+        print("vocabulary from: %s" % source)
+    else:
+        root = Path(args.logs)
+        if not root.is_dir():
+            for guess in (Path("/sessions/admiring-sharp-keller/mnt/RP_Logs"),
+                          Path.home() / "Documents" / "RP_Logs"):
+                if guess.is_dir():
+                    root = guess
+                    break
+        words = vocabulary(root, args.vocab)
+        print("logs: %s" % root)
     print("vocabulary: %d words to expand" % len(words))
 
     out = Path(args.out)
@@ -250,7 +263,7 @@ def main():
         links = AffordanceWeb.load(out).links
         print("resuming: %d already done" % len(links))
 
-    todo = [w for w in words if w not in links]
+    todo = [w for w in words if _stem(w) not in links]
     started = time.time()
     failures = 0
     for i, word in enumerate(todo, 1):
@@ -265,7 +278,15 @@ def main():
             continue
         got = parse(text, word)
         if got:
-            links[word] = got
+            # Prompt with the surface form, key by the stem.
+            #
+            # These were the same string in the first build, because the
+            # vocabulary came from _words(), which stems. So the model was
+            # asked "what does `amaz` apply to?" -- and, worse, any word whose
+            # stem differs from its surface form was stored under a key that
+            # related() would never look up, since related() stems its
+            # argument. The entry existed and was unreachable.
+            links[_stem(word)] = got
             AffordanceWeb(links).save(out)
         if i % 25 == 0 or i <= 3:
             rate = i / max(1e-9, time.time() - started)

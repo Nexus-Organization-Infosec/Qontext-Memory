@@ -1485,3 +1485,98 @@ This is the first positive retrieval result in the project measured on a
 benchmark that passes its own control. It should be treated as one sound
 result on a small authored item set — not as a solved problem, and explicitly
 not as the 3× headline the raw numbers would support.
+
+---
+
+# The affordance web, with the coverage excuse removed
+
+Regenerated over `turn_bench.py`'s own vocabulary — all 110 surface forms from
+the 14 turn-shaped pairs, both the query side and the fact side. 108 linked.
+Two generator bugs fixed first:
+
+1. It prompted the model with **stems**, because the vocabulary came from
+   `_words()`. The model was asked what `amaz` applies to.
+2. Worse, it **keyed entries by the prompted string while `related()` looks
+   them up by stem.** Any word whose stem differs from its surface form was
+   stored under a key that could never be retrieved. The entry existed and was
+   invisible.
+
+## It still fails, and harder
+
+| arm | real | shuffled | control |
+|---|---|---|---|
+| baseline | 6.0/18 | 0.67 | 6.9× |
+| affordance web (RP vocab) | 6.3/18 | 1.50 | 3.7× |
+| **affordance web (rebuilt)** | 8.0/18 | 2.62 | **2.6×** |
+| static embeddings K=6 | 9.7/18 | 1.12 | 6.2× |
+
+The rebuilt web raises real by 2.0 and shuffled by 1.95 — **they rise
+together, nearly 1:1.** That is bulk, not signal. Embeddings raise real by 3.7
+and shuffled by 0.45, an eight-fold difference.
+
+## Not an artefact of the adapter
+
+Before condemning it, the same reach test the retracted bridges were given,
+with packing removed entirely — is the needed fact anywhere in the web's
+proposals?
+
+| expansions/word | min overlap | reached | candidate pool |
+|---|---|---|---|
+| 3 | 1 | 2/14 | 11 knots |
+| 5 | 1 | 3/14 | 16 |
+| 8 | 1 | 3/14 | 23 |
+| any | **2** | **0/14** | **~0** |
+
+Requiring two shared expansion words collapses the pool to nothing: **no knot
+ever shares two expansion terms with a query.** Tightening the adapter does
+not sharpen it, it kills reach. The ceiling is 3/14 at a cost of 23 extra
+candidates, against 6/14 for embeddings at a cost of 6.
+
+## Why — and it is not a quality problem
+
+The expansions are *correct English*. That is what makes this interesting.
+
+```
+seafood  -> fish, shrimp, crab, lobster, oyster, squid, whale
+bechamel -> sauce, milk, butter, flour, pasta, lasagna, soup
+```
+
+The needed knots say **shellfish** and **vegan**. Neither appears, and neither
+should: `shellfish` is not a thing seafood *applies to*, it is a co-hyponym at
+the same level of abstraction. `vegan` is not a thing bechamel applies to, it
+is a property two inferential hops away.
+
+The affordance relation expands **downward and outward into associated
+concrete things**. The gaps need **sideways, at matched abstraction**.
+
+## The conjecture is now contradicted, not merely unsupported
+
+Version 1 argued that PPMI and embeddings all fail because they encode
+*similarity*, whereas the required relation is *dependence on an unwritten
+continuation* — a property no encoder computes. The affordance web was built
+on that argument.
+
+On a benchmark with a written key and a working control:
+
+- the mechanism built on that argument reaches 3/14 and fails the control
+- the mechanisms the argument dismissed reach 6/14 and pass it
+
+Co-hyponyms appear in similar contexts, which is exactly what a contextual
+embedding measures. **The needed relation was similarity after all.** The
+argument was a plausible story that survived only because the metric behind it
+could not reward the thing it was arguing against.
+
+## Limits
+
+One web, one model, one prompt template, 14 authored gaps. A different
+elicitation ("name words that could substitute for X") might well behave like
+an embedding — but at that point it is an embedding with extra steps and a
+server dependency. Nothing here says structured lexical knowledge is useless
+in general; it says *this* relation does not cross *these* gaps.
+
+## Standing
+
+This is the project's first **cleanly refuted** bridge. The six retracted ones
+were uninterpretable — scored on a set we could not claim was needed. This one
+had full vocabulary coverage, a written key, a control that passes on the
+baseline, and a reach test independent of packing. It failed all three.

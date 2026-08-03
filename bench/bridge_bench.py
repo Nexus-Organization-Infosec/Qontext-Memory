@@ -52,13 +52,13 @@ def bridge_none(_mem):
     return None
 
 
-def bridge_affordance(mem):
+def bridge_affordance(mem, filename="affordance_web.json"):
     """The model-generated affordance web: what a word can apply to."""
     sys.path.insert(0, str(LIVE))
     from build_affordance_web import AffordanceWeb
-    path = LIVE / "affordance_web.json"
+    path = LIVE / filename
     if not path.exists():
-        return "missing affordance_web.json"
+        return "missing %s" % filename
     web = AffordanceWeb.load(path)
 
     def propose(query, knots, topk):
@@ -108,11 +108,24 @@ def bridge_static(_mem):
     return propose
 
 
+def bridge_affordance_rebuilt(mem):
+    """The web regenerated over THIS benchmark's vocabulary.
+
+    The first run scored the web at 3.7x -- a control failure -- but it had
+    been generated over the roleplay logs, so the failure could have been
+    coverage rather than mechanism. This arm removes that excuse: every
+    surface form in the 14 turn-shaped pairs was expanded. If it still fails,
+    the relation is wrong for these gaps rather than absent from the table.
+    """
+    return bridge_affordance(mem, "affordance_turnbench.json")
+
+
 BRIDGES = [
     ("baseline (lexical only)", bridge_none, {}),
     ("write-time index terms", bridge_none, {"INDEX_TERMS": 10}),
     ("index terms OFF", bridge_none, {"INDEX_TERMS": 0}),
-    ("affordance web", bridge_affordance, {}),
+    ("affordance web (RP vocab)", bridge_affordance, {}),
+    ("affordance web (rebuilt)", bridge_affordance_rebuilt, {}),
     ("static embeddings", bridge_static, {}),
 ]
 
