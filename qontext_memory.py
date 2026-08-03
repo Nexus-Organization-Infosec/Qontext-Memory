@@ -127,19 +127,37 @@ INDEX_DF_CEILING = 0.02     # skip words already in this share of knots
 # the pack is filled by greedy maximum-marginal vocabulary coverage: each
 # knot chosen is the one adding the most words not already in the pack.
 #
-# Measured (chat suites A/B/C at budget 300; 11 roleplay logs at 1200):
+# RETRACTION, read this before tuning the constant.
 #
-#     gate    A       B       C       turn-shaped
-#     0.0     10/10   10/10   40/40    5.59%      always lexical
-#     1.0     10/10   10/10   40/40    7.53%      free: +35% on turns
-#     2.0      9/10    8/10   40/40    8.46%
-#     3.0      9/10    7/10   38/40   11.71%
-#     99.0     6/10    7/10    3/40   16.21%      always coverage
+# Everything in the four paragraphs above is motivated by measurements from
+# rp_turnbench.py, and that benchmark has since failed a shuffle control:
+# pairing a turn with a reply from an *unrelated conversation* marks 97% as
+# many facts "needed" as the true continuation does. The same control
+# separates correct from incorrect by 42.9x on the hand-keyed chat suites, so
+# the control works and the benchmark does not. See RP_FINDINGS.md and
+# audit_control.py.
 #
-# 1.0 is the default because it costs nothing measurable on quiz-shaped
-# retrieval. Raise it for roleplay, where turn-shaped queries dominate and
-# two questions on a stress suite are worth doubling carried facts. 0.0
-# disables the mechanism.
+# So: the 9.31% / 14.51% / 16.60% figures are withdrawn, and with them the
+# claim that random beats lexical and that coverage beats both. The reasoning
+# may still be right. It is currently unsupported.
+#
+# The constant stays, at 1.0, for one reason only -- it was verified
+# byte-identical to the previous behaviour on the chat suites at every budget
+# (150/300/800), across 98 unit tests and the supersession suite. It is known
+# harmless. It is no longer known to be useful.
+#
+# Do not raise it on the strength of the turn column below. Those numbers came
+# from the retracted benchmark:
+#
+#     gate    A       B       C       turn-shaped (WITHDRAWN)
+#     0.0     10/10   10/10   40/40    4.3%       always lexical
+#     1.0     10/10   10/10   40/40    5.0%       verified free on A/B/C
+#     2.0      9/10    8/10   40/40    5.8%
+#     3.0      --      7/10   38/40    8.6%
+#     99.0     --      6/10    3/40   14.1%       always coverage
+#
+# The A/B/C columns are sound; the turn column is not. Raising the gate has a
+# measured cost and an unmeasured benefit. 0.0 disables the mechanism.
 COVERAGE_GATE = 1.0
 
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")

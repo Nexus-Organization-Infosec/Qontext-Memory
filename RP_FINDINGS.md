@@ -1152,3 +1152,109 @@ query was never going to reach. **When retrieval cannot find the target, the
 correct response is not to search harder — it is to stop searching and cover
 the space instead.** The affordance web was not a bad idea; it was a good
 answer to a question that had already been settled against.
+
+---
+
+# RETRACTION: every turn-shaped number in this file
+
+Including the section immediately above, written the same day.
+
+## The control
+
+The turn benchmark infers ground truth from the conversation's own
+continuation: a knot sharing a rare word with the next reply is counted as a
+fact the reply needed. The replies in these logs were generated from the full
+transcript, not from a pack, so nothing in that construction excludes
+coincidence.
+
+Test: score each turn's memory against the **wrong** reply. Same conversation,
+same characters, same register — only the pairing broken.
+
+| pairing | facts marked needed | share of real |
+|---|---|---|
+| the real reply | 1,289 | 100% |
+| wrong reply, same conversation | 1,181 (5 seeds) | **92%** (89–95) |
+| reply from a different conversation | 1,245 (5 seeds) | **97%** (95–97) |
+
+A reply from a conversation with different characters, setting and plot marks
+97% as many facts "needed" as the true continuation. Only 13% of the real
+reply's needed set is also marked by the shuffled one — the metric is not even
+stably wrong, it selects a fresh arbitrary subset each time.
+
+The words it treated as distinctive evidence: `already`, `feel`, `back`,
+`face`, `care`, `gentle`, `question`. `MAX_DOC_COUNT` is an absolute count
+rather than a document frequency, and `content_words` does not stem, so common
+words dodge it in a small store.
+
+## Controlling the control
+
+A control that says "shuffled equals real" regardless of target proves
+nothing. Run identically against the chat suites, where the key is
+hand-written — each question scored against a *different* question's keywords:
+
+| | real | shuffled | separation |
+|---|---|---|---|
+| chat suites (hand-written key) | 100% | 2% | **42.9×** |
+| turn benchmark (proxy key) | 100% | 92% | **1.09×** |
+
+The instrument works. The benchmark does not.
+
+Reproduce: `python audit_needed.py <logs>` and `python audit_control.py`.
+
+## Withdrawn
+
+Everything in this file derived from `rp_turnbench.py`:
+
+- the 79.8% / 14.9% / 5.3% failure decomposition
+- 23.2% lexical reachability; the 100% oracle ceiling in `turn_ceiling.py`
+- 44.5% write-time bridging, and the index-terms result (+0.8 pts, "5 better,
+  0 worse") — note this was already retracted once, then reinstated, and is
+  now withdrawn a second time for a different reason
+- bridge reach for PPMI (6.8%), static embeddings (7.5%), MiniLM (7.7%,
+  47.6%@50), structural expansion, and the affordance web (18.5% / 0.2%)
+- random 14.51% vs lexical 9.31% vs coverage 16.60% — the diversity control
+- the `bridge_slots.py` +3.26 points
+- the roleplay progression 4.1% → 6.3% → 9.6% → 11.2%
+- the `PACK_RESERVE` sweep and its 0.5 roleplay default; `CORD_SHARE`;
+  `SCENE_RESERVE`
+- the COVERAGE_GATE turn column (4.3% → 5.0% → 8.6% → 14.1%)
+
+The bridges are **uninterpretable, not refuted.** Each was scored on
+retrieving a set we can no longer claim was needed.
+
+## What survives
+
+Anything with a hand-written answer key: the 119× cost result, the conditional
+accuracy result and its boundary, the transcript failure modes, the extraction
+finding, chat suites A/B/C, 98 unit tests, the supersession suite. These share
+no instrumentation with the above.
+
+`COVERAGE_GATE = 1.0` stays in the code because it was verified
+byte-identical on the real suites at every budget — but its *motivation* is
+withdrawn, and that is now said in the source.
+
+## The lesson, stated as a rule
+
+This is the fifth instrumentation failure in the project and the first to
+reach publication. Four of the five are one error wearing different clothes: a
+measurement was trusted because it produced plausible numbers, and no
+condition was ever constructed under which it would have produced obviously
+wrong ones.
+
+> **Every instrument must be given a chance to fail visibly.** A knob that
+> claims to disable a feature is verified by confirming the feature stopped
+> happening. A generation cap is verified by measuring generation length
+> against it. A proxy ground truth is verified by feeding it a wrong answer.
+> Plausible output is not evidence that an instrument works.
+
+The turn benchmark never produced an absurd number, never contradicted itself,
+and each mechanism it evaluated failed in a way that appeared to explain the
+last. That is what made the programme feel convergent rather than vacuous.
+Cheap, plausible and self-confirming is the characteristic hazard of
+evaluation without answer keys.
+
+## Next
+
+Build a turn-shaped benchmark with planted facts and a written key — the
+`long_bench.py` discipline with turn-shaped queries instead of quiz questions
+— and run `audit_control.py` against it **before** trusting a single number.
