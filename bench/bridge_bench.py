@@ -80,32 +80,66 @@ def bridge_affordance(mem, filename="affordance_web.json"):
     return propose
 
 
-def bridge_static(_mem):
-    """Static sentence embeddings (model2vec). No torch, no server."""
-    try:
-        import numpy as np
+_EMBED_CACHE = {}
+
+
+def _embedder(name, backend):
+    """One encoder, cached across arms and suites so nothing reloads."""
+    key = (name, backend)
+    if key in _EMBED_CACHE:
+        return _EMBED_CACHE[key]
+    import numpy as np
+    if backend == "static":
         from model2vec import StaticModel
-    except ImportError as exc:
-        return "model2vec unavailable (%s)" % exc
-    model = StaticModel.from_pretrained("minishlab/potion-base-8M")
+        model = StaticModel.from_pretrained(name)
+
+        def raw(texts):
+            return model.encode(texts)
+    else:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer(name)
+
+        def raw(texts):
+            return model.encode(texts, batch_size=128,
+                                show_progress_bar=False)
+
     cache = {}
 
     def embed(texts):
         fresh = [t for t in texts if t not in cache]
         if fresh:
-            vecs = np.asarray(model.encode(fresh), dtype="float32")
+            vecs = np.asarray(raw(fresh), dtype="float32")
             vecs /= (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9)
             for t, v in zip(fresh, vecs):
                 cache[t] = v
         return np.stack([cache[t] for t in texts])
 
-    def propose(query, knots, topk):
-        matrix = embed(list(knots))
-        scores = matrix @ embed([query])[0]
-        order = np.argsort(-scores)
-        return [knots[i] for i in order[:topk]]
+    _EMBED_CACHE[key] = embed
+    return embed
 
-    return propose
+
+def _make_embed_bridge(name, backend):
+    def make(_mem):
+        try:
+            import numpy as np
+            embed = _embedder(name, backend)
+        except Exception as exc:                      # noqa: BLE001
+            return "%s unavailable (%s)" % (backend, exc)
+
+        def propose(query, knots, topk):
+            matrix = embed(list(knots))
+            order = np.argsort(-(matrix @ embed([query])[0]))
+            return [knots[i] for i in order[:topk]]
+        return propose
+    return make
+
+
+# Static vectors are a deliberate LOWER BOUND: no context window, essentially
+# a well-trained bag of word vectors. A contextual encoder should do better,
+# and if it does not that is worth knowing too.
+bridge_static = _make_embed_bridge("minishlab/potion-base-8M", "static")
+bridge_minilm = _make_embed_bridge("sentence-transformers/all-MiniLM-L6-v2",
+                                   "sentence")
 
 
 def bridge_affordance_rebuilt(mem):
@@ -124,9 +158,9 @@ BRIDGES = [
     ("baseline (lexical only)", bridge_none, {}),
     ("write-time index terms", bridge_none, {"INDEX_TERMS": 10}),
     ("index terms OFF", bridge_none, {"INDEX_TERMS": 0}),
-    ("affordance web (RP vocab)", bridge_affordance, {}),
     ("affordance web (rebuilt)", bridge_affordance_rebuilt, {}),
-    ("static embeddings", bridge_static, {}),
+    ("static emb (model2vec)", bridge_static, {}),
+    ("contextual emb (MiniLM)", bridge_minilm, {}),
 ]
 
 
@@ -152,9 +186,16 @@ def packer(mem, propose, topk):
     return pack
 
 
-def score(pack, budget, key_for):
+def score(pack, budget, key_for, pairs=None, mem=None):
+    """Items whose fact never reached the store are skipped -- an extraction
+    failure is not a retrieval failure, and scoring it as one blames the
+    retriever for something it never had."""
+    rows = tb.PAIRS if pairs is None else pairs
+    store = "\n".join(mem.entries()).lower() if mem is not None else None
     hits, by_kind = 0, {}
-    for i, (_st, _kw, query, kind) in enumerate(tb.PAIRS):
+    for i, (_st, _kw, query, kind) in enumerate(rows):
+        if store is not None and not any(k in store for k in rows[i][1]):
+            continue
         packed = pack(query, budget).lower()
         got = any(k in packed for k in key_for(i))
         hits += got
@@ -164,15 +205,16 @@ def score(pack, budget, key_for):
     return hits, by_kind
 
 
-def control(pack, budget, seeds):
+def control(pack, budget, seeds, pairs=None, mem=None):
+    rows = tb.PAIRS if pairs is None else pairs
     out = []
     for seed in seeds:
         rnd = random.Random(seed)
 
         def wrong(i, _r=rnd):
-            other = [j for j in range(len(tb.PAIRS)) if j != i]
-            return tb.PAIRS[_r.choice(other)][1]
-        out.append(score(pack, budget, wrong)[0])
+            other = [j for j in range(len(rows)) if j != i]
+            return rows[_r.choice(other)][1]
+        out.append(score(pack, budget, wrong, rows, mem)[0])
     return statistics.mean(out)
 
 
@@ -203,8 +245,7 @@ def main():
     #
     # Reporting only the verdict would repeat the original sin of this
     # project: a number whose failure mode is invisible.
-    header = ("%-26s %7s %9s %8s %6s  %s"
-              % ("arm", "real", "shuffled", "control", "turn", "by gap kind"))
+    header = "%-26s   %-24s %-24s" % ("arm", "A (tuned-on)", "B (HELD OUT)")
     print(header)
     print("-" * len(header))
 
@@ -217,65 +258,81 @@ def main():
             if key not in overrides:
                 setattr(qm, key, value)
 
-        turn_hits, turn_all, seps, kinds = 0, 0, [], {}
-        reals, shufs, chars = [], [], []
         problem = None
-        for cseed in conv_seeds:
-            conv = tb.build(args.turns, cseed, 0.10, "daily-clean")
-            mem = tb.memory(conv)
-            propose = make(mem)
-            if isinstance(propose, str):
-                problem = propose
+        per_suite = {}
+        for sname, spairs in tb.SUITES:
+            turn_hits, turn_all, seps, kinds = 0, 0, [], {}
+            for cseed in conv_seeds:
+                conv = tb.build(args.turns, cseed, 0.10, "daily-clean",
+                                spairs)
+                mem = tb.memory(conv)
+                propose = make(mem)
+                if isinstance(propose, str):
+                    problem = propose
+                    break
+                pack = packer(mem, propose, args.topk)
+                real, by_kind = score(pack, args.budget,
+                                      lambda i: spairs[i][1], spairs, mem)
+                shuf = control(pack, args.budget, ctrl_seeds, spairs, mem)
+                seps.append(real / shuf if shuf else float("inf"))
+                for kind, (got, total) in by_kind.items():
+                    slot = kinds.setdefault(kind, [0, 0])
+                    slot[0] += got
+                    slot[1] += total
+                    if kind != "quiz":
+                        turn_hits += got
+                        turn_all += total
+            if problem:
                 break
-            pack = packer(mem, propose, args.topk)
-            real, by_kind = score(pack, args.budget, lambda i: tb.PAIRS[i][1])
-            shuf = control(pack, args.budget, ctrl_seeds)
-            reals.append(real)
-            shufs.append(shuf)
-            chars.append(statistics.mean(
-                [len(pack(q, args.budget)) for _s, _k, q, _x in tb.PAIRS]))
-            seps.append(real / shuf if shuf else float("inf"))
-            for kind, (got, total) in by_kind.items():
-                slot = kinds.setdefault(kind, [0, 0])
-                slot[0] += got
-                slot[1] += total
-                if kind != "quiz":
-                    turn_hits += got
-                    turn_all += total
+            per_suite[sname] = (turn_hits, turn_all, min(seps), kinds)
 
         if problem:
-            print("%-26s %7s %9s %8s %6s  SKIPPED: %s"
-                  % (label, "-", "-", "-", "-", problem))
+            print("%-26s  SKIPPED: %s" % (label, problem))
             continue
 
-        worst = min(seps)
-        n = len(tb.PAIRS)
-        stem = ("%-26s %5.1f/%-2d %6.2f/%-2d %7.1fx"
-                % (label, statistics.mean(reals), n,
-                   statistics.mean(shufs), n, worst))
-        if worst < MIN_SEPARATION:
-            print("%s %6s  FAILED (pack %.0f chars)"
-                  % (stem, "-", statistics.mean(chars)))
-            rows.append((label, worst, None, None))
-            continue
-        detail = " ".join("%s %d/%d" % (k[:4], kinds[k][0], kinds[k][1])
-                          for k in KINDS if k in kinds and k != "quiz")
-        print("%s %3d/%-3d %s" % (stem, turn_hits, turn_all, detail))
-        rows.append((label, worst, turn_hits, turn_all))
+        cells, worst = [], 99.9
+        for sname, _sp in tb.SUITES:
+            hits, total, sep, kinds = per_suite[sname]
+            worst = min(worst, sep)
+            cells.append((sname, hits, total, sep, kinds))
+
+        line = "%-26s" % label
+        failed = False
+        for sname, hits, total, sep, _k in cells:
+            if sep < MIN_SEPARATION:
+                line += "   %s FAILED(%.1fx)" % (sname.split()[0], sep)
+                failed = True
+            else:
+                line += "   %s %2d/%-2d (%2.0f%%) %4.1fx" % (
+                    sname.split()[0], hits, total, 100.0 * hits / total, sep)
+        print(line)
+        rows.append((label, failed, cells))
 
     for key, value in original.items():
         setattr(qm, key, value)
 
-    print("\nquiz-shaped anchor was %d/%d per arm (sanity: must be perfect)"
-          % (4 * len(conv_seeds), 4 * len(conv_seeds)))
-
     base = next((r for r in rows if r[0].startswith("baseline")), None)
-    if base and base[2] is not None:
-        print("\nchange against baseline (%d/%d):" % (base[2], base[3]))
-        for label, _sep, hits, total in rows:
-            if hits is None or label.startswith("baseline"):
+    if base and not base[1]:
+        print("\nchange against baseline, per suite "
+              "(a gain on A alone is overfitting, not a finding):")
+        bA, bB = base[2][0][1], base[2][1][1]
+        for label, failed, cells in rows:
+            if failed or label.startswith("baseline"):
                 continue
-            print("  %-26s %+d" % (label, hits - base[2]))
+            dA, dB = cells[0][1] - bA, cells[1][1] - bB
+            verdict = ("generalises" if dA > 0 and dB > 0 else
+                       "A only -- OVERFIT" if dA > 0 >= dB else
+                       "B only" if dB > 0 >= dA else "no effect")
+            print("  %-26s A %+d   B %+d   %s" % (label, dA, dB, verdict))
+
+    print("\nper gap kind, held-out suite B:")
+    for label, failed, cells in rows:
+        if failed:
+            continue
+        kinds = cells[1][4]
+        print("  %-26s %s" % (label, "  ".join(
+            "%s %d/%d" % (k, kinds[k][0], kinds[k][1])
+            for k in KINDS if k in kinds and k != "quiz")))
     return 0
 
 

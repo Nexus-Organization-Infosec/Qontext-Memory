@@ -1580,3 +1580,81 @@ This is the project's first **cleanly refuted** bridge. The six retracted ones
 were uninterpretable — scored on a set we could not claim was needed. This one
 had full vocabulary coverage, a written key, a control that passes on the
 baseline, and a reach test independent of packing. It failed all three.
+
+---
+
+# A held-out suite, and the first result that survives one
+
+Suite A has fourteen turn-shaped items, all written by us, and we had already
+used it to tune K for the embedding bridge. Fitting a mechanism to fourteen
+invented sentences is how a *sound* benchmark becomes an unsound result. The
+chat suites have carried a tuned-on/held-out split since the beginning; the
+turn benchmark had none.
+
+**Suite B**: 24 facts, 20 turn-shaped, written afterwards and never tuned
+against. Deliberately unlike A in surface features — workplace and civic
+vocabulary instead of domestic, different names, different gap instances — so
+it tests generalisation rather than resampling. Same specification.
+
+The rule: a mechanism may be tuned on A. Results are reported on **both**,
+always, and a gain that appears only on A is reported as overfitting rather
+than as a finding.
+
+## Two authoring defects B exposed immediately
+
+1. *"My hearing aid battery died this morning"* never entered the store. The
+   extractor rejected it, so the item was measuring extraction, not
+   retrieval. `score()` now skips items whose fact is absent from memory and
+   names them separately as an **extraction miss**. Two different failures,
+   two different numbers.
+
+2. *"What street does the user live on?"* was labelled `quiz` but shares no
+   word with "my flat is on Weverstraat" — a hypernym gap wearing a quiz
+   label, and it duly failed. A quiz anchor must repeat the vocabulary of its
+   answer; that is the entire point of having one. Reworded to "Where is the
+   user's flat?"
+
+Both were our errors, and both were invisible until a second suite existed.
+
+## Result
+
+Budget 800, K=6, 2 conversation seeds per suite.
+
+| arm | A (tuned-on) | B (HELD OUT) | verdict |
+|---|---|---|---|
+| baseline (lexical) | 4/28 (14%) 6.9× | 8/38 (21%) 12.8× | — |
+| write-time index terms | 4/28 (14%) | 8/38 (21%) | no effect |
+| index terms OFF | 4/28 (14%) | 8/38 (21%) | no effect |
+| affordance web (rebuilt) | **FAILED 2.6×** | 8/38 (21%) 5.8× | no effect |
+| **static embeddings** | **12/28 (43%)** | **16/38 (42%)** | **generalises** |
+
+**+8 on A and +8 on B.** 43% against 42% — the held-out suite reproduces the
+tuned-on gain almost exactly. This is the first result in the project to be
+confirmed on items it was not fitted to.
+
+Index terms are confirmed inert a third time, now on held-out data.
+
+## Per gap kind, held-out suite B
+
+| gap | lexical | +embeddings |
+|---|---|---|
+| hypernym | 0/8 | **4/8** |
+| inference | 0/6 | **4/6** |
+| reference | 6/8 | 6/8 |
+| script | 0/8 | 0/8 |
+| consequence | 2/8 | 2/8 |
+
+The profile differs from A in one instructive way: on A, `inference` was the
+category embeddings could not touch (1/6). On B they get 4/6. B's inference
+items are *pregnant → Rioja*, *gluten → couscous*, *colourblind → amber/lime*
+— all cases where the two terms genuinely co-occur in ordinary text. A's were
+*vegan → bechamel* and *teetotal → wine tasting*, which need a hop through an
+unstated middle term (dairy, alcohol).
+
+So "inference" is not one category. It splits into gaps that distributional
+co-occurrence already covers and gaps needing an intermediate concept, and our
+label conflated them. **The category scheme is a hypothesis, not a
+measurement**, and this is the first evidence it is partly wrong.
+
+`script` is 0/8 on B and 1/5 on A — the hardest category for every mechanism
+tried so far, and the one worth attacking next.

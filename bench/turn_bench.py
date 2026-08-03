@@ -118,26 +118,113 @@ PAIRS = [
      "Which programming language does the user use?", "quiz"),
 ]
 
+# ---------------------------------------------------------------- suite B
+#
+# HELD OUT. Written after suite A had already been used to tune K for the
+# embedding bridge, and never tuned against.
+#
+# The reason it exists: A has fourteen turn-shaped items and the author wrote
+# every one of them. Fitting a mechanism to fourteen sentences of one person's
+# invention is how a sound benchmark becomes an unsound result, and this
+# project has already shipped one of those. The chat suites have carried a
+# tuned-on/held-out split from the start; the turn benchmark had none.
+#
+# B is deliberately unlike A in surface features, so it tests generalisation
+# rather than resampling: workplace and civic vocabulary instead of domestic,
+# different names, different gap instances. Same specification -- the query
+# must share as little vocabulary with the fact as the gap kind allows.
+#
+# The rule that makes it worth having: a mechanism may be tuned on A. Results
+# are reported on both, always, and a gain that appears only on A is reported
+# as overfitting rather than as a finding.
+PAIRS_B = [
+    ("I'm allergic to penicillin.", ["penicillin"],
+     "The doctor will probably put you on antibiotics for that.", "hypernym"),
+    ("We use PostgreSQL for everything.", ["postgresql"],
+     "Which database should I point the new service at?", "hypernym"),
+    ("I drive an old Volvo estate.", ["volvo"],
+     "Will the whole team fit in your car on Saturday?", "hypernym"),
+    ("My cat is called Pluis.", ["pluis"],
+     "Do you need someone to feed the animals while you're away?",
+     "hypernym"),
+
+    ("My wife Saskia runs a bakery.", ["saskia"],
+     "Is your wife working this Saturday?", "reference"),
+    ("Our lead designer is Bram.", ["bram"],
+     "Has the designer seen the new mockups yet?", "reference"),
+    ("I did my masters at Wageningen.", ["wageningen"],
+     "Do you ever go back to where you studied?", "reference"),
+    ("My youngest, Fenna, started school in September.", ["fenna"],
+     "How's your youngest settling in?", "reference"),
+
+    ("I carry the pager every third weekend.", ["pager"],
+     "Fancy a long hike up in the hills this Saturday?", "script"),
+    ("The office badge readers stop working after 19:00.", ["badge"],
+     "I'll come by and drop the laptop off around eight in the evening.",
+     "script"),
+    ("I keep kosher.", ["kosher"],
+     "Shall I order the bacon sandwiches for the meeting?", "script"),
+    ("My passport expires in March.", ["passport"],
+     "Shall we book the Tokyo trip for the summer?", "script"),
+
+    ("The building's lift has been out of order since April.", ["lift"],
+     "My mother's coming to visit, she's ninety-one.", "consequence"),
+    ("I've got stitches in my hand until Friday.", ["stitches"],
+     "Are you joining the five-a-side on Wednesday?", "consequence"),
+    ("Our AWS credits run out at the end of Q3.", ["aws"],
+     "Can we leave the training cluster running through October?",
+     "consequence"),
+    ("I'm banned from driving until June.", ["banned"],
+     "Could you do the airport run on Saturday morning?", "consequence"),
+
+    ("I'm six months pregnant.", ["pregnant"],
+     "Shall I pour you a glass of the Rioja?", "inference"),
+    ("I gave up gluten last year.", ["gluten"],
+     "I've made a big bowl of couscous for everyone.", "inference"),
+    ("I'm red-green colourblind.", ["colourblind"],
+     "Just click it when the indicator goes from amber to lime.",
+     "inference"),
+    ("My hearing aid battery died this morning.", ["hearing"],
+     "Let's take the call in the atrium, it's livelier there.", "inference"),
+
+    ("My manager is called Ingrid.", ["ingrid"],
+     "Who is the user's manager?", "quiz"),
+    ("The standup is at 09:15 sharp.", ["09:15"],
+     "When is the standup?", "quiz"),
+    ("We deploy on Kubernetes.", ["kubernetes"],
+     "What do they deploy on?", "quiz"),
+    # "What street does the user live on?" was the first version of this and
+    # it is not a quiz question: it shares no word with "my flat is on
+    # Weverstraat", so it was a hypernym gap wearing a quiz label, and it
+    # duly failed. A quiz anchor must repeat the vocabulary of its answer --
+    # that is the whole point of having one.
+    ("My flat is on Weverstraat.", ["weverstraat"],
+     "Where is the user's flat?", "quiz"),
+]
+
+SUITES = [("A (tuned-on)", PAIRS), ("B (held-out)", PAIRS_B)]
+
 BUDGETS = (300, 800)
 # Below this the benchmark is not reporting a measurement, it is reporting
 # noise that happens to be shaped like one. Chosen before the first run.
 MIN_SEPARATION = 5.0
 
 
-def build(turns, seed, decoy_rate, filler):
+def build(turns, seed, decoy_rate, filler, pairs=None):
     """Facts first, then filler -- the long_bench construction."""
     rnd = random.Random(seed)
-    pairs = (daily_pairs(filler == "daily-clean")
+    daily = (daily_pairs(filler == "daily-clean")
              if filler.startswith("daily") else None)
+    pairs_ = PAIRS if pairs is None else pairs
     conversation = []
-    for statement, _kw, _q, _kind in PAIRS:
+    for statement, _kw, _q, _kind in pairs_:
         conversation.append(("user", statement))
         conversation.append(("assistant", rnd.choice(REPLIES)))
     while len(conversation) < turns:
         if rnd.random() < decoy_rate:
             conversation.append(("user", decoy(rnd)))
-        elif pairs is not None:
-            said, replied = rnd.choice(pairs)
+        elif daily is not None:
+            said, replied = rnd.choice(daily)
             conversation.append(("user", said))
             conversation.append(("assistant", replied))
             continue
@@ -155,10 +242,19 @@ def memory(conversation):
     return mem
 
 
-def score(mem, budget, key_for):
-    """key_for(i) -> keywords to look for when scoring pair i."""
+def score(mem, budget, key_for, pairs=None, skip_unstored=True):
+    """key_for(i) -> keywords to look for when scoring pair i.
+
+    Items whose fact never reached the store are skipped: they are an
+    extraction failure and counting them as retrieval misses would blame the
+    retriever for something it never had a chance at.
+    """
+    rows = PAIRS if pairs is None else pairs
+    store = "\n".join(mem.entries()).lower() if skip_unstored else None
     hits, by_kind = 0, {}
-    for i, (_st, _kw, query, kind) in enumerate(PAIRS):
+    for i, (_st, _kw, query, kind) in enumerate(rows):
+        if store is not None and not any(k in store for k in rows[i][1]):
+            continue
         packed = mem.pack(query, budget).lower()
         got = any(k in packed for k in key_for(i))
         hits += got
@@ -168,15 +264,17 @@ def score(mem, budget, key_for):
     return hits, by_kind
 
 
-def control(mem, budget, seeds):
+def control(mem, budget, seeds, pairs=None):
     """Score every turn against a DIFFERENT fact's key. Must collapse."""
+    rows = PAIRS if pairs is None else pairs
     totals = []
     for seed in seeds:
         rnd = random.Random(seed)
+
         def wrong(i, _rnd=rnd):
-            other = [j for j in range(len(PAIRS)) if j != i]
-            return PAIRS[_rnd.choice(other)][1]
-        hits, _ = score(mem, budget, wrong)
+            other = [j for j in range(len(rows)) if j != i]
+            return rows[_rnd.choice(other)][1]
+        hits, _ = score(mem, budget, wrong, rows)
         totals.append(hits)
     return statistics.mean(totals)
 
@@ -195,58 +293,54 @@ def main():
     budgets = tuple(args.budget) if args.budget else BUDGETS
     seeds = list(range(1, args.control_seeds + 1))
 
-    conversation = build(args.turns, args.seed, args.decoy_rate, args.filler)
-    mem = memory(conversation)
-    n = len(PAIRS)
+    for label, pairs in SUITES:
+        conversation = build(args.turns, args.seed, args.decoy_rate,
+                             args.filler, pairs)
+        mem = memory(conversation)
+        n = len(pairs)
+        turn_n = sum(1 for p in pairs if p[3] != "quiz")
+        print("\n" + "=" * 64)
+        print("SUITE %s -- %d facts (%d turn-shaped), %d knots stored"
+              % (label, n, turn_n, len(mem)))
+        print("=" * 64)
 
-    print("turn_bench: %d turns, %s filler, decoys %.0f%%, %d knots stored"
-          % (len(conversation), args.filler, 100 * args.decoy_rate, len(mem)))
-    print("%d planted facts, each with a written key and a turn that needs it"
-          % n)
+        # A fact the extractor never stored cannot be retrieved, and scoring
+        # it as a retrieval miss conflates two different failures. Report
+        # them apart: retrieval is measured on the items that are actually
+        # in memory, and the rest are named as an extraction result.
+        store = "\n".join(mem.entries()).lower()
+        lost = [(st, kind) for st, kw, _q, kind in pairs
+                if not any(k in store for k in kw)]
+        if lost:
+            print("  %d fact(s) never entered memory -- an EXTRACTION miss, "
+                  "excluded from the retrieval score:" % len(lost))
+            for st, kind in lost:
+                print("      [%s] %s" % (kind, st))
 
-    # ------------------------------------------------------------- control
-    print("\n" + "-" * 62)
-    print("CONTROL (runs first; no score is printed if this fails)")
-    print("-" * 62)
-    print("%8s %10s %12s %12s" % ("budget", "real", "shuffled", "separation"))
-    separations = {}
-    for budget in budgets:
-        real, _ = score(mem, budget, lambda i: PAIRS[i][1])
-        shuf = control(mem, budget, seeds)
-        sep = real / shuf if shuf else float("inf")
-        separations[budget] = sep
-        print("%8d %7d/%-3d %9.2f/%-3d %11s"
-              % (budget, real, n, shuf, n,
-                 "inf" if sep == float("inf") else "%.1fx" % sep))
+        ok = True
+        for budget in budgets:
+            real, _ = score(mem, budget, lambda i: pairs[i][1], pairs)
+            shuf = control(mem, budget, seeds, pairs)
+            sep = real / shuf if shuf else float("inf")
+            flag = "" if sep >= MIN_SEPARATION else "   <-- BELOW BAR"
+            print("  control @%-4d real %2d/%-2d  shuffled %5.2f  %5.1fx%s"
+                  % (budget, real, n, shuf,
+                     99.9 if sep == float("inf") else sep, flag))
+            ok = ok and sep >= MIN_SEPARATION
+        if not ok:
+            print("\n  FAILED the control. No score reported for this suite.")
+            continue
 
-    worst = min(separations.values())
-    if worst < MIN_SEPARATION:
-        print("\nFAILED: separation %.1fx is below the %.1fx bar.\n"
-              "The benchmark cannot distinguish the right fact from an\n"
-              "arbitrary one, so no accuracy number from it means anything.\n"
-              "Not reporting scores." % (worst, MIN_SEPARATION))
-        return 1
-    print("\nPASSED: worst separation %.1fx (bar is %.1fx). Scores follow."
-          % (worst, MIN_SEPARATION))
-
-    # -------------------------------------------------------------- result
-    for budget in budgets:
-        hits, by_kind = score(mem, budget, lambda i: PAIRS[i][1])
-        print("\n" + "-" * 62)
-        print("budget %d: %d/%d facts carried  (%.0f%%)"
-              % (budget, hits, n, 100.0 * hits / n))
-        print("-" * 62)
-        order = ["quiz", "hypernym", "reference", "script", "consequence",
-                 "inference"]
-        for kind in order:
-            if kind in by_kind:
-                got, total = by_kind[kind]
-                print("  %-12s %d/%d" % (kind, got, total))
-        turn_got = sum(v[0] for k, v in by_kind.items() if k != "quiz")
-        turn_all = sum(v[1] for k, v in by_kind.items() if k != "quiz")
-        print("  %-12s %d/%d  (%.0f%%)   <- the actual measurement"
-              % ("TURN-SHAPED", turn_got, turn_all,
-                 100.0 * turn_got / turn_all))
+        for budget in budgets:
+            hits, by_kind = score(mem, budget, lambda i: pairs[i][1], pairs)
+            order = ["quiz", "hypernym", "reference", "script",
+                     "consequence", "inference"]
+            detail = "  ".join("%s %d/%d" % (k, by_kind[k][0], by_kind[k][1])
+                               for k in order if k in by_kind)
+            got = sum(v[0] for k, v in by_kind.items() if k != "quiz")
+            allq = sum(v[1] for k, v in by_kind.items() if k != "quiz")
+            print("  budget %-4d TURN-SHAPED %2d/%-2d (%2.0f%%)   %s"
+                  % (budget, got, allq, 100.0 * got / allq, detail))
     return 0
 
 
