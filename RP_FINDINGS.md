@@ -1047,3 +1047,108 @@ a character's next reply. Joining the two is a day's work and would settle it.
 Until then the honest status of dual representation is: **a mechanism with a
 plausible account, one point of directional evidence across eleven logs, and a
 prediction nobody has been able to test.**
+
+---
+
+## The query is the wrong instrument, and ranking is worse than not ranking
+
+Six bridges were built to make the query reach further: PPMI co-occurrence,
+static embeddings (model2vec), contextual embeddings (MiniLM), structural cord
+expansion, write-time index terms, and a model-generated affordance web. All
+six landed within noise of each other on the same population. The affordance
+web — the one built on the *right* relation, "what does this word apply to"
+rather than "what resembles it" — reached 18.5% of the unreachable facts and
+converted 0.2% of them into the pack. The rescued knots ranked at a median of
+35 where roughly 17 fit the budget.
+
+Six failures with the same shape is not six bad ideas. It is one wrong
+assumption underneath all of them.
+
+### The control that settled it
+
+Fill the pack by ignoring the query entirely.
+
+| strategy | needed facts carried | knots per pack |
+|---|---|---|
+| lexical ranking | 9.31% | 11.6 |
+| **random** | **14.51%** | 16.4 |
+| shortest-first | 14.82% | 31.6 |
+| longest-first | 13.73% | 10.6 |
+| **greedy vocabulary coverage** | **16.60%** | 11.3 |
+
+Random beats the retriever. That is not a statement about lexical scoring
+being weak — a weak retriever should still beat chance. It means the ordering
+is actively harmful: on a turn-shaped query only **23.2%** of the facts the
+reply needs are lexically reachable at all, and the ranking spends the whole
+budget inside that quarter, clustering on whatever shared a common word.
+Random selection at least samples the other three quarters.
+
+Coverage packing — greedily taking the knot that adds the most words the pack
+does not yet contain — beats random too, at a third of random's knot count.
+Spread, not relevance, is what a turn-shaped query can be served by.
+
+### Why this cannot simply replace ranking
+
+The same measurement on quiz-shaped queries, where a question names what it
+wants:
+
+| packing | A | B | C (stress) |
+|---|---|---|---|
+| lexical | 10/10 | 10/10 | 40/40 |
+| pure coverage | 6/10 | 7/10 | **3/40** |
+
+Coverage destroys quiz retrieval. 40/40 to 3/40 is not a regression, it is the
+mechanism being wrong for that query shape. The two shapes want opposite
+policies, so the question is not which to use but **how to tell them apart at
+retrieval time**.
+
+### COVERAGE_GATE
+
+The top lexical score is itself the discriminator. A query that names its
+target produces a high best-match score; a query that names the scene produces
+a low one. So: trust the ranking when it clears a threshold, pack for coverage
+when it does not.
+
+Measured in the real harness (`eval_memory.py` at budget 300;
+`rp_turnbench.py` across 11 logs at 1200):
+
+| gate | A | B | C | turn-shaped |
+|---|---|---|---|---|
+| 0.0 (off, always lexical) | 10/10 | 10/10 | 40/40 | 4.3% |
+| **1.0 (default)** | **10/10** | **10/10** | **40/40** | **5.0%** |
+| 2.0 | 9/10 | 8/10 | 40/40 | 5.8% |
+| 3.0 | — | 7/10 | 38/40 | 8.6% |
+| 5.0 | — | 6/10 | 20/40 | 11.8% |
+| 99.0 (always coverage) | — | 6/10 | 3/40 | 14.1% |
+
+**Gate 1.0 is free.** Every chat suite is byte-identical to the baseline at
+every budget (150/300/800), 98 unit tests pass, supersession passes. On turns
+it carries 79 of 1289 needed facts against 72: **two logs improved (log5
+3→6, log7 0→4), nine unchanged, none harmed.**
+
+### A discrepancy worth recording
+
+A standalone prototype of this gate, run before the mechanism was moved into
+`pack()`, reported 5.59% → 7.53% for the same gates. The integrated version
+reports 4.3% → 5.0%. The prototype filled from the raw ranked list; `pack()`
+applies the relevance floor, the subject-focus damping and the reserve, so the
+two are not measuring the same packer. **The shape of the curve reproduced;
+the magnitude did not.** The integrated number is the one that counts, and it
+is smaller — reported here rather than the flattering one, per the standing
+rule in this file.
+
+### What it costs and what it is worth
+
+At 1.0 the gate fires rarely, which is exactly why it is free and also why the
+gain is 0.7 points rather than 3. The value is not the 0.7. It is that the
+dial exists and is monotone in both directions, so a deployment can choose:
+assistant chat keeps 1.0, roleplay can take 3.0 and double its carried facts
+for two questions on a stress suite that no roleplay ever asks.
+
+### The conceptual result
+
+Six bridges failed because they all tried to make the query reach further. The
+query was never going to reach. **When retrieval cannot find the target, the
+correct response is not to search harder — it is to stop searching and cover
+the space instead.** The affordance web was not a bad idea; it was a good
+answer to a question that had already been settled against.

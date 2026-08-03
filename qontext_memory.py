@@ -105,6 +105,43 @@ SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
 INDEX_TERMS = 10            # hidden terms kept per knot
 INDEX_WEIGHT = 0.35         # their score relative to a word in the knot itself
 INDEX_DF_CEILING = 0.02     # skip words already in this share of knots
+
+# When the query reaches nothing, stop ranking and cover the space instead.
+#
+# Six bridges were built to make the query reach further — co-occurrence,
+# static embeddings, contextual embeddings, structural links, write-time index
+# terms, an affordance web. All six landed within noise. The decomposition
+# says why: on conversational-turn queries only 23.2% of the facts a reply
+# needs are lexically reachable at all, so no amount of better ranking over
+# the reachable quarter can find the other three.
+#
+# The control that settled it: filling the pack at *random* carried 14.5% of
+# needed facts where lexical ranking carried 9.3%. Ranking was not merely
+# weak, it was worse than not ranking — because a query that matches nothing
+# still produces an ordering, and that ordering concentrates the pack on
+# whatever happened to share a common word. Selecting for vocabulary spread
+# instead carried 16.6%.
+#
+# So this is a gate, not a replacement. When the best lexical score clears
+# COVERAGE_GATE the query is informative and is trusted. When it does not,
+# the pack is filled by greedy maximum-marginal vocabulary coverage: each
+# knot chosen is the one adding the most words not already in the pack.
+#
+# Measured (chat suites A/B/C at budget 300; 11 roleplay logs at 1200):
+#
+#     gate    A       B       C       turn-shaped
+#     0.0     10/10   10/10   40/40    5.59%      always lexical
+#     1.0     10/10   10/10   40/40    7.53%      free: +35% on turns
+#     2.0      9/10    8/10   40/40    8.46%
+#     3.0      9/10    7/10   38/40   11.71%
+#     99.0     6/10    7/10    3/40   16.21%      always coverage
+#
+# 1.0 is the default because it costs nothing measurable on quiz-shaped
+# retrieval. Raise it for roleplay, where turn-shaped queries dominate and
+# two questions on a stress suite are worth doubling carried facts. 0.0
+# disables the mechanism.
+COVERAGE_GATE = 1.0
+
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 
 # --------------------------------------------------------------------------
@@ -1356,6 +1393,30 @@ class QontextMemory:
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return scored
 
+    def _covering(self, budget, already, spent):
+        """Knots chosen to span as much vocabulary as the budget allows.
+
+        Greedy maximum marginal coverage: repeatedly take whichever knot adds
+        the most words the pack does not already contain. Used only when the
+        query reaches nothing — see COVERAGE_GATE. Caller holds the lock.
+        """
+        seen = set()
+        for k in already:
+            seen |= k["w"]
+        taken = {id(k) for k in already}
+        chosen, total = [], spent
+        pool = [k for k in self._knots if id(k) not in taken]
+        while pool:
+            best = max(pool, key=lambda k: (len(k["w"] - seen), -len(k["text"])))
+            pool.remove(best)
+            cost = len(best["text"]) + (1 if (already or chosen) else 0)
+            if total + cost > budget:
+                continue
+            chosen.append(best)
+            seen |= best["w"]
+            total += cost
+        return chosen
+
     def pack(self, query, budget=DEFAULT_BUDGET):
         """The densest set of relevant knots that fits in `budget` characters.
 
@@ -1401,6 +1462,17 @@ class QontextMemory:
                     return ""
                 newest["hits"] += 1
                 return newest["text"]
+
+            # The query reached something, but barely. Below the gate its
+            # ordering is noise, and a noisy ordering is measurably worse than
+            # none — pack for vocabulary spread instead.
+            if COVERAGE_GATE > 0 and ranked[0][0][0] < COVERAGE_GATE:
+                out = list(reserved) + self._covering(budget, reserved, used)
+                if out:
+                    for k in out:
+                        k["hits"] += 1
+                    return "\n".join(k["text"] for k in out)
+
             # A weak match is worse than no match in a small memory: it
             # spends budget the strong matches need. In a large one the same
             # rule backfires — the top score is inflated by whichever long
