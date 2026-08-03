@@ -146,19 +146,30 @@ INDEX_DF_CEILING = 0.02     # skip words already in this share of knots
 # (150/300/800), across 98 unit tests and the supersession suite. It is known
 # harmless. It is no longer known to be useful.
 #
-# Do not raise it on the strength of the turn column below. Those numbers came
-# from the retracted benchmark:
+# RE-MEASURED on turn_bench.py, which carries a written answer key and passes
+# a shuffle control at 6.9-12x across five conversation seeds. On that
+# benchmark the gate does NOTHING:
 #
-#     gate    A       B       C       turn-shaped (WITHDRAWN)
-#     0.0     10/10   10/10   40/40    4.3%       always lexical
-#     1.0     10/10   10/10   40/40    5.0%       verified free on A/B/C
-#     2.0      9/10    8/10   40/40    5.8%
-#     3.0      --      7/10   38/40    8.6%
-#     99.0     --      6/10    3/40   14.1%       always coverage
+#     gate    quiz    turn-shaped     control
+#     0.0     4/4     2/14            6.9x
+#     1.0     4/4     2/14            6.9x
+#     3.0     4/4     2/14            6.9x
+#     99.0    --      --              0.7x  FAILED, no score reported
 #
-# The A/B/C columns are sound; the turn column is not. Raising the gate has a
-# measured cost and an unmeasured benefit. 0.0 disables the mechanism.
-COVERAGE_GATE = 1.0
+# Gate 99 is pure coverage packing, and it does not merely score badly -- it
+# fails the benchmark's control. A pack built without reference to the query
+# contains the right fact no more often than a wrong one, so the metric can no
+# longer tell them apart. That is also the mechanical explanation for why the
+# retracted benchmark *liked* coverage: its needed-set was 97% unchanged when
+# given a reply from an unrelated conversation, so it was itself a
+# query-independent metric, and a query-independent packer scored well on it.
+# The finding was circular.
+#
+# Default is therefore 0.0, off. The mechanism is kept because it is cheap and
+# correct in construction, and because a future sound benchmark may find a
+# workload it helps. It currently has no evidence behind it, and a feature
+# with no evidence should not be on.
+COVERAGE_GATE = 0.0
 
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 

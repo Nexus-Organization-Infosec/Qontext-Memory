@@ -1258,3 +1258,115 @@ evaluation without answer keys.
 Build a turn-shaped benchmark with planted facts and a written key — the
 `long_bench.py` discipline with turn-shaped queries instead of quiz questions
 — and run `audit_control.py` against it **before** trusting a single number.
+
+---
+
+# A replacement benchmark, and what it says
+
+`qontext-bench/turn_bench.py`. Built after the retraction, to the rule the
+retraction produced: an instrument must be given a chance to fail visibly.
+
+## Construction
+
+Keep what made the retracted benchmark worth building, discard what killed it.
+
+- **Kept**: queries are conversational turns, not quiz questions.
+- **Discarded**: inferred ground truth. Every dependency is *written down* —
+  the fact, the turn that needs it, and the words that prove it was carried.
+
+Eighteen facts planted in an 800-turn conversation with DailyDialog filler and
+10% decoys, the `long_bench.py` construction. Four are quiz-shaped, as a
+sanity anchor. Fourteen are turn-shaped and labelled by the kind of gap the
+retriever must cross: hypernym (shellfish → "seafood place"), reference
+("your brother" → Joris), script (night shifts → "ring you at nine tomorrow
+morning"), consequence (car in the garage until Friday → "collect me
+Wednesday"), inference (vegan → "lasagne, loads of bechamel").
+
+**The control runs first and gates the report.** Each turn is scored against a
+different fact's key; if separation falls below 5×, the benchmark prints the
+failure and exits non-zero without reporting accuracy.
+
+## It discriminates
+
+| seed | knots | separation |
+|---|---|---|
+| 7 | 170 | 6.9× |
+| 11 | 166 | 6.9× |
+| 23 | 154 | 9.6× |
+| 42 | 177 | 9.6× |
+| 99 | 175 | 12.0× |
+
+Against 1.09× for the retracted benchmark. Quiz-shaped scores 4/4 on every
+seed, so the memory is not broken upstream of the experiment.
+
+## Result
+
+**Turn-shaped: 2/14 (14%), identical on all five seeds.**
+
+| gap kind | carried |
+|---|---|
+| quiz (anchor) | 4/4 |
+| reference | 1/3 |
+| script | 1/5 |
+| hypernym | 0/1 |
+| consequence | 0/3 |
+| inference | 0/2 |
+
+The two hits are the two where a content word survives the gap
+("brother"/"brother", "repo"→project). Everything requiring an actual bridge
+misses.
+
+Nothing moves it:
+
+| knob | turn-shaped |
+|---|---|
+| budget 300 → 800 | 2/14 → 2/14 |
+| RELEVANCE_FLOOR 0.5 → 0.1 → 0.0 | 2/14 → 2/14 → 2/14 |
+| COVERAGE_GATE 0.0 → 1.0 → 3.0 | 2/14 → 2/14 → 2/14 |
+
+The pack averages 179 chars at a 300 budget and **192 at an 800 budget** — it
+is not budget-bound, it is out of things it can find.
+
+## COVERAGE_GATE is withdrawn as a default
+
+Committed this morning at 1.0 on the retracted benchmark, where gate 3.0
+appeared to double carried facts. On the sound benchmark it changes nothing at
+any setting, so the default is now **0.0, off**.
+
+The interesting part is gate 99 — pure coverage packing — which does not
+merely score badly. **It fails the control at 0.7×.** A pack built without
+reference to the query contains the right fact no more often than a wrong one,
+so the metric can no longer separate them, and the benchmark refuses to report.
+
+That is the mechanical explanation for the whole coverage episode. The
+retracted metric was itself query-independent: it marked 97% as many facts
+"needed" when handed a reply from an unrelated conversation. A
+query-independent metric rewards a query-independent packer. Random beat
+lexical, and coverage beat random, because neither was being asked to respond
+to the query and neither was the metric. **The finding was circular, and the
+new control detects the circularity directly.**
+
+## What this does and does not establish
+
+**Does:** the memory retrieves reliably when the query shares vocabulary with
+the fact (4/4 quiz, 40/40 stress suite), and essentially not at all when it
+does not (2/14). Neither ranking, budget, floor nor coverage changes the
+second number. The bottleneck is reachability.
+
+**Does not:** say that 14% is the achievable rate in real conversation. *We
+wrote the gaps.* "Seafood → shellfish" and "bechamel → vegan" were chosen
+precisely because lexical retrieval cannot cross them. The difficulty is
+authored, not sampled.
+
+So this is a **differential** instrument, not an absolute one. It is valid for
+comparing mechanism A against mechanism B on a fixed set of gaps, which is
+exactly what the six retracted bridges needed and never had. It is not valid
+for claiming a real-world rate, and 18 facts is a small sample besides.
+
+## What it is good for next
+
+Re-run the six retracted bridges against it. Each was scored on retrieving a
+set we could not claim was needed; here the need is written down, the gap
+kinds are labelled, and the control gates the answer. A bridge that crosses
+`hypernym` and `inference` gaps would now show up as exactly that, per
+category, instead of as a percentage of an arbitrary population.
