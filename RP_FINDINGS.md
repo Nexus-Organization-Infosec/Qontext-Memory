@@ -1370,3 +1370,118 @@ set we could not claim was needed; here the need is written down, the gap
 kinds are labelled, and the control gates the answer. A bridge that crosses
 `hypernym` and `inference` gaps would now show up as exactly that, per
 category, instead of as a percentage of an arbitrary population.
+
+---
+
+# The bridges, re-run — and a reversal
+
+`qontext-bench/bridge_bench.py`. The six mechanisms were scored on a benchmark
+that has since been retracted, so their results were uninterpretable rather
+than refuted. This is the re-run, on `turn_bench.py`, with the shuffle control
+gating every arm.
+
+Method: the pack is filled lexically first, then the bridge adds proposals
+while budget remains. Strictly additive — a bridge can add a fact the query
+had no word for, but can never displace one the ranking wanted. A failure is
+therefore attributable to reach.
+
+## Result
+
+3 conversation seeds, budget 800. `real`/`shuffled` are printed even for
+failed arms, because "added bulk" and "found something and drowned it" are
+different failures and the verdict alone cannot tell them apart.
+
+| arm | real | shuffled | control | turn-shaped |
+|---|---|---|---|---|
+| baseline (lexical) | 6.0/18 | 0.67 | 6.9× | 6/42 |
+| write-time index terms | 6.0/18 | 0.67 | 6.9× | 6/42 |
+| index terms OFF | 6.0/18 | 0.75 | 8.0× | 6/42 |
+| affordance web | 6.3/18 | 1.50 | 3.7× | **FAILED** |
+| static embeddings, K=6 | 9.7/18 | 1.12 | 6.2× | **17/42** |
+
+**Static embeddings work.** Version 1 dismissed them at "7.5% reach, within
+noise of counted co-occurrence". On a benchmark with a written key they nearly
+triple turn-shaped retrieval.
+
+Five conversation seeds, K=6, per-seed rather than pooled:
+
+| seed | lexical | +embed | control |
+|---|---|---|---|
+| 7 | 2/14 | 6/14 | 6.2× |
+| 11 | 2/14 | 3/14 | 5.1× |
+| 23 | 2/14 | 6/14 | 10.0× |
+| 42 | 2/14 | 5/14 | 9.0× |
+| 99 | 2/14 | 5/14 | 12.0× |
+
+Every seed improves, none regresses. Wired into `pack()` and re-measured:
+**23/70 (33%) against 10/70 (14%)**. Chat suites untouched at K=3 and K=6,
+both budgets: 10/10, 10/10, 40/40. 98 tests pass, supersession PASS.
+
+By gap kind, the profile is the interesting part:
+
+| gap | lexical | +embed K=6 |
+|---|---|---|
+| hypernym (shellfish → "seafood") | 0/3 | **3/3** |
+| reference ("your brother" → Joris) | 3/9 | 5/9 |
+| script (night shifts → "ring you at nine") | 3/15 | 5/15 |
+| consequence (garage till Friday → "collect me Wednesday") | 0/9 | 3/9 |
+| inference (vegan → "lasagne, bechamel") | 0/6 | 1/6 |
+
+Hypernym gaps close completely. Inference gaps stay shut, which is the
+expected place for a bag-of-vectors model to fail.
+
+## Why the reversal
+
+The retracted benchmark's needed-set was 97% unchanged when handed a reply
+from an unrelated conversation — it was very nearly a query-independent
+metric. Embeddings retrieve *semantically related* knots. Retrieving
+semantically related knots cannot help you retrieve an arbitrary set, so they
+scored at chance.
+
+**The mechanism was dismissed by a metric structurally incapable of rewarding
+it.** This is the counterpart to the coverage result: the same broken metric
+rewarded query-independent packing and punished query-dependent retrieval,
+which is exactly the pair of errors it should be expected to make. Both are
+now explained by one property of the instrument rather than by two separate
+stories about retrieval.
+
+## K is a real constraint, not a knob to maximise
+
+| K | turn-shaped | control | shuffled | pack chars |
+|---|---|---|---|---|
+| 0 | 10/70 | 6.9× | 0.67 | 192 |
+| 3 | ~15/70 | 9.1× | 0.75 | ~300 |
+| 6 | 25/70 | 6.2× | 1.12 | ~350 |
+| 10 | — | **4.9× FAILED** | 2.25 | 625 |
+
+At K=10 the pack is swamped: both real and shuffled rise, separation drops
+below the bar, and the benchmark refuses to report. The shuffled column is the
+diagnostic — while it stays flat the bridge is adding signal; when it climbs
+with the real score, it is adding bulk.
+
+## What this costs and what it does not establish
+
+**Costs a dependency.** `model2vec` (~30 MB, no torch). The library's claim to
+be a single dependency-free file survives only because the bridge is optional
+and off by default: `QontextMemory(bridge=fn, bridge_k=6)`.
+
+**Does not establish a real-world rate.** We wrote the gaps. "Seafood →
+shellfish" was chosen because lexical retrieval cannot cross it, so 33%
+measures authored difficulty.
+
+**The item sample is 14, not 70.** The five seeds vary the filler and decoys,
+not the facts or the queries. Seed-to-seed agreement shows robustness to
+distractors, not robustness to item choice. Fourteen turn-shaped items is a
+small sample and the confidence interval on 33% is wide.
+
+**The affordance web is not cleanly refuted.** It was generated over the
+roleplay logs' vocabulary, not this benchmark's, so its failure here may be
+coverage rather than mechanism. Rebuilding it against this vocabulary needs
+the local model server and has not been done.
+
+## Standing
+
+This is the first positive retrieval result in the project measured on a
+benchmark that passes its own control. It should be treated as one sound
+result on a small authored item set — not as a solved problem, and explicitly
+not as the 3× headline the raw numbers would support.

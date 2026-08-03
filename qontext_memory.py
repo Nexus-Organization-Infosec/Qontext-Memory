@@ -171,6 +171,39 @@ INDEX_DF_CEILING = 0.02     # skip words already in this share of knots
 # with no evidence should not be on.
 COVERAGE_GATE = 0.0
 
+# How many knots an optional semantic bridge may add to the pack.
+#
+# Version 1 of the paper reported that sentence embeddings reach 7.5% of
+# unreachable facts and land "within noise" of counted co-occurrence. That
+# measurement came from the retracted benchmark, whose needed-set was 97%
+# unchanged when handed a reply from an unrelated conversation. Embeddings
+# retrieve *semantically related* knots; retrieving semantically related knots
+# cannot help you retrieve an arbitrary set, so they scored at chance. The
+# mechanism was dismissed by a metric incapable of rewarding it.
+#
+# Re-run on turn_bench.py, which has a written key and gates every arm on a
+# shuffle control (5 conversation seeds, budget 800, static model2vec vectors,
+# lexical pack first and the bridge filling what remains):
+#
+#     K     turn-shaped   control    shuffled
+#     0      10/70 (14%)    6.9x       0.67     lexical only
+#     2      ~12/70         8.0x       0.71
+#     3      ~15/70         9.1x       0.75
+#     6      25/70 (36%)    6.2x       1.12
+#     10        --          4.9x  FAILED, pack swamped at 625 chars
+#
+# Every seed improved and none regressed (+4 +1 +4 +3 +3). Chat suites are
+# untouched at K=3 and K=6, both budgets: 10/10, 10/10, 40/40. Hypernym gaps
+# went 0/3 -> 3/3; the gaps that stay shut are `inference` (1/6).
+#
+# The shuffled score barely moves while the real score nearly triples, which
+# is what separates a bridge from bulk: at K=10 both rise, separation falls
+# below the bar, and the benchmark refuses to report. Keep K small.
+#
+# Off by default. A bridge needs an embedding model, and this file has no
+# dependencies; see bench/bridge_bench.py for a working one in ~20 lines.
+BRIDGE_K = 6
+
 _CHAINED_POSSESSIVE = re.compile(r"\bthe (?:user|team)'s \w+'s\b")
 
 # --------------------------------------------------------------------------
@@ -1027,7 +1060,7 @@ class QontextMemory:
     FORMAT_VERSION = 2
 
     def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="user",
-                 weave=None):
+                 weave=None, bridge=None, bridge_k=BRIDGE_K):
         if not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive int")
         if speakers not in ("user", "all"):
@@ -1041,6 +1074,11 @@ class QontextMemory:
         # words hang together, used to reach knots the query has no word for.
         # External on purpose, so this file stays standalone.
         self.weave = weave
+        # Optional semantic bridge: bridge(query, knots, k) -> [knot text].
+        # See BRIDGE_K. External on purpose — a bridge needs an embedding
+        # model, and this file stays dependency-free without one.
+        self.bridge = bridge
+        self.bridge_k = max(0, int(bridge_k))
         self._knots = []          # list of dicts: text, seq, hits, ts, w
         self._seen = set()        # exact-duplicate guard
         self._index = {}          # token -> {seq, ...} inverted index
@@ -1523,7 +1561,33 @@ class QontextMemory:
                 total += cost
             for k in out:
                 k["hits"] += 1
-            return "\n".join(k["text"] for k in out)
+            packed = "\n".join(k["text"] for k in out)
+
+            # A semantic bridge fills what the ranking left, and only that.
+            # It can add a fact the query had no word for; it can never
+            # displace one the ranking asked for. Keeping it strictly
+            # additive is what makes a failure attributable to reach.
+            if self.bridge is not None and self.bridge_k:
+                total = len(packed)
+                chosen = packed.split("\n") if packed else []
+                seen = set(chosen)
+                try:
+                    proposed = self.bridge(query, [k["text"] for k in
+                                                   self._knots],
+                                           self.bridge_k)
+                except Exception:
+                    proposed = []          # a bridge must never break pack()
+                for text in proposed or []:
+                    if text in seen:
+                        continue
+                    cost = len(text) + (1 if chosen else 0)
+                    if total + cost > budget:
+                        continue
+                    chosen.append(text)
+                    seen.add(text)
+                    total += cost
+                packed = "\n".join(chosen)
+            return packed
 
     def explain(self, query, budget=DEFAULT_BUDGET):
         """Why pack() chose what it chose — [(score, in_pack, text)]."""
