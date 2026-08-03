@@ -1724,3 +1724,79 @@ the fact; what connects them is that one makes the other impossible.
 
 `consequence` (2/8, unmoved) is the same shape. Together that is 16 of 38
 held-out items on which no bridge has ever scored, and it is the next problem.
+
+---
+
+# RETRACTION: "script and consequence are unreachable by similarity"
+
+Written one entry above, on the strength of `0/8` at K=6. It is wrong.
+
+## The measurement I should have run first
+
+Rank of the correct knot under embedding cosine, suite B, 172 knots:
+
+| gap | ranks | median |
+|---|---|---|
+| script | 16, 23, 26, 106 | **24** |
+| consequence | 8, 15, 27, 84 | **21** |
+| reference | 1, 14, 35, 70 | 24 |
+| hypernym | 5, 5, 100, 106 | 52 |
+| inference | 1, 3, 117 | 3 |
+
+The correct knot for a `script` item sits at median rank 24 of 172 — the 86th
+percentile. Similarity reaches these perfectly well. **K=6 was cutting them
+off.** "Nothing in the query is semantically near the fact; what connects them
+is that one makes the other impossible" was a satisfying story fitted to a
+score, not a property of the data.
+
+## What is actually the constraint
+
+Suite B, held out, static embeddings:
+
+| budget | K | turn-shaped | control | pack chars |
+|---|---|---|---|---|
+| 800 | 6 | 16/38 (42%) | 19.2× | 408 |
+| 800 | 30 | 17/38 | 7.4× | 793 |
+| **1500** | **30** | **26/38 (68%)** | **5.4×** | 1448 |
+| 3000 | 30 | 26/38 | **4.5× FAILED** | 1563 |
+
+By gap kind, K=6@800 → K=30@1500:
+
+| gap | K=6 | K=30 |
+|---|---|---|
+| script | 0/8 | **6/8** |
+| consequence | 2/8 | **6/8** |
+| hypernym | 4/8 | 4/8 |
+| reference | 6/8 | 6/8 |
+| inference | 4/6 | 4/6 |
+
+The two categories declared unreachable are exactly the two that unlock. They
+were never a semantic problem; they were the items ranked 15–30, which is
+outside a six-slot bridge and inside a thirty-slot one.
+
+## The real trade, stated honestly
+
+42% → 68% held-out costs **3.6× the pack** (408 → 1448 characters) and drops
+the control from 19.2× to 5.4×, which is barely over the 5.0 bar. At budget
+3000 it fails outright at 4.5%. The mechanism is not "more is better" — a
+larger pack is a less specific pack, and the control measures that directly.
+
+So the residual is **budget-bound, not reach-bound.** That is a much more
+tractable problem than the one I described, and it points somewhere different:
+not at a new semantic mechanism, but at precision. Getting the rank-24 knot to
+rank 5 would buy the same items at a quarter of the cost, and would not
+degrade the control.
+
+## Why this keeps happening
+
+Sixth time. The pattern is identical each time: a number is produced, a
+mechanism is invented to explain it, and the explanation is never given a
+chance to be wrong. `0/8` supports "unreachable" and also supports "reachable
+at rank 24 with a cutoff of 6", and I picked the one that sounded like a
+finding.
+
+The rank measurement cost one script and ninety seconds. It should have been
+run before the sentence claiming a universal negative, not after.
+
+> **A score of zero has at least two explanations: the thing is absent, or
+> your cutoff is too small. Measure the rank before naming the cause.**
