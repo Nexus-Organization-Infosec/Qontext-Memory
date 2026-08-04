@@ -299,6 +299,128 @@ class TestPack(unittest.TestCase):
         self.assertEqual(len(rows), len(self.mem.entries()))
 
 
+class TestWideBridge(unittest.TestCase):
+    """wide_bridge: a second, typically expensive bridge (llm_judge_bridge.py
+    in production) used INSTEAD of `bridge` only when `bridge_classifier`
+    predicts a query needs the wide net. The point of gating it here rather
+    than in the caller is that it must be provably off for every query the
+    classifier doesn't flag -- these tests check that directly, with stub
+    bridges instead of a real embedding model or a live LLM server, so they
+    run offline and fast."""
+
+    def _mem(self, **kw):
+        mem = QontextMemory(**kw)
+        mem.observe("user", "People call me Marta.")
+        mem.observe("user", "I work as a nurse.")
+        return mem
+
+    def test_wide_bridge_none_reproduces_old_behaviour(self):
+        """Leaving wide_bridge at its default: narrow and wide queries both
+        call `bridge`, exactly as before this parameter existed."""
+        calls = []
+
+        def bridge(query, knots, k):
+            calls.append((query, k))
+            return []
+        mem = self._mem(bridge=bridge, bridge_k=3,
+                        bridge_classifier=lambda q: "WIDE" in q,
+                        bridge_k_wide=9)
+        mem.pack("narrow query", 300)
+        mem.pack("a WIDE query", 300)
+        self.assertEqual(calls, [("narrow query", 3), ("a WIDE query", 9)])
+
+    def test_narrow_query_uses_cheap_bridge_not_wide_bridge(self):
+        cheap_calls, judge_calls = [], []
+
+        def cheap(query, knots, k):
+            cheap_calls.append(query)
+            return []
+
+        def judge(query, knots, k):
+            judge_calls.append(query)
+            return []
+        mem = self._mem(bridge=cheap, bridge_classifier=lambda q: False,
+                        wide_bridge=judge)
+        mem.pack("anything", 300)
+        self.assertEqual(cheap_calls, ["anything"])
+        self.assertEqual(judge_calls, [])
+
+    def test_wide_query_uses_wide_bridge_not_cheap_bridge(self):
+        cheap_calls, judge_calls = [], []
+
+        def cheap(query, knots, k):
+            cheap_calls.append(query)
+            return []
+
+        def judge(query, knots, k):
+            judge_calls.append(k)
+            return []
+        mem = self._mem(bridge=cheap, bridge_k=3,
+                        bridge_classifier=lambda q: True,
+                        bridge_k_wide=17, wide_bridge=judge)
+        mem.pack("anything", 300)
+        self.assertEqual(cheap_calls, [])
+        self.assertEqual(judge_calls, [17])
+
+    def test_wide_bridge_only_fires_when_classifier_says_wide(self):
+        """bridge=None entirely -- a pure 'LLM-judge-only-on-hard-queries'
+        setup, no cheap bridge at all. Easy queries must get nothing extra;
+        only the ones the classifier flags should ever reach the judge."""
+        judge_calls = []
+
+        def judge(query, knots, k):
+            judge_calls.append(query)
+            return ["extra fact from judge"]
+        mem = self._mem(bridge=None, bridge_classifier=lambda q: "hard" in q,
+                        wide_bridge=judge, bridge_k_wide=5)
+        packed_easy = mem.pack("easy query", 300)
+        packed_hard = mem.pack("this is hard", 300)
+        self.assertEqual(judge_calls, ["this is hard"])
+        self.assertNotIn("extra fact from judge", packed_easy)
+        self.assertIn("extra fact from judge", packed_hard)
+
+    def test_wide_bridge_result_is_additive_and_budget_capped(self):
+        """A wide verdict already raises the effective ceiling to
+        budget * bridge_budget_multiplier -- that's the pre-existing,
+        documented adaptive-K contract (see pack()'s docstring), not
+        something wide_bridge changes. What wide_bridge must not do is
+        blow past THAT ceiling."""
+        def judge(query, knots, k):
+            return ["A" * 5000]      # far bigger than any ceiling below
+        mem = self._mem(bridge=None, bridge_classifier=lambda q: True,
+                        wide_bridge=judge, bridge_budget_multiplier=1.875)
+        for budget in (10, 50, 300):
+            ceiling = int(budget * 1.875)
+            self.assertLessEqual(len(mem.pack("anything", budget)), ceiling)
+
+    def test_wide_bridge_exception_does_not_break_pack(self):
+        def judge(query, knots, k):
+            raise RuntimeError("server down")
+        mem = self._mem(bridge=None, bridge_classifier=lambda q: True,
+                        wide_bridge=judge)
+        packed = mem.pack("anything", 300)     # must not raise
+        self.assertIsInstance(packed, str)
+
+    def test_classifier_exception_falls_back_to_cheap_bridge_not_wide(self):
+        cheap_calls, judge_calls = [], []
+
+        def cheap(query, knots, k):
+            cheap_calls.append(query)
+            return []
+
+        def judge(query, knots, k):
+            judge_calls.append(query)
+            return []
+
+        def bad_classifier(q):
+            raise RuntimeError("boom")
+        mem = self._mem(bridge=cheap, bridge_classifier=bad_classifier,
+                        wide_bridge=judge)
+        mem.pack("anything", 300)
+        self.assertEqual(cheap_calls, ["anything"])
+        self.assertEqual(judge_calls, [])
+
+
 class TestBoundedGrowth(unittest.TestCase):
     def test_respects_max_entries(self):
         mem = QontextMemory(max_entries=10)

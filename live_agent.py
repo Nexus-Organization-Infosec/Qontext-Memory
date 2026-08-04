@@ -31,7 +31,8 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-from qontext_memory import QuipuMemory
+import llm_judge_bridge
+from qontext_memory import QuipuMemory, bridge_needs_wide
 
 CONFIG = {
     "api_url": "http://127.0.0.1:8080/v1/chat/completions",
@@ -43,6 +44,16 @@ CONFIG = {
     "top_p": 0.95,
     "memory_file": "qontext.qx",
     "max_knots": 500,          # hard ceiling; least useful are evicted first
+    # Ask the model itself, at query time, which stored facts it needs --
+    # but only on turns bridge_needs_wide() predicts plain retrieval will
+    # miss. See llm_judge_bridge.py: first mechanism in this project to
+    # cross the script/consequence gap kinds, at a real cost of seconds per
+    # query rather than microseconds. That cost is why it is gated, not run
+    # on every turn -- most turns never reach it. Off costs nothing extra;
+    # on costs one extra call to the same server `chat()` already uses, on
+    # the minority of turns flagged wide.
+    "llm_judge": True,
+    "bridge_k_wide": 10,        # facts the judge may add on a flagged turn
 }
 
 HERE = Path(__file__).parent
@@ -54,8 +65,33 @@ SYSTEM = ("You are a helpful, concise assistant. "
 
 
 def load_memory():
-    """Never fails: a missing or corrupt memory file yields an empty memory."""
-    return QuipuMemory.load(MEM_PATH, max_entries=CONFIG["max_knots"])
+    """Never fails: a missing or corrupt memory file yields an empty memory.
+
+    LLM-judge wiring happens here, not in __init__/load(), because it needs
+    a live probe of the server -- bridge/bridge_classifier/wide_bridge are
+    plain instance attributes, so setting them after construction is exactly
+    as valid as passing them to QontextMemory(...), and this way a save/load
+    round-trip (which never serialises callables) doesn't need to know about
+    it at all.
+    """
+    mem = QuipuMemory.load(MEM_PATH, max_entries=CONFIG["max_knots"])
+    if CONFIG["llm_judge"]:
+        health_url = CONFIG["api_url"].rsplit("/v1/", 1)[0] + "/health"
+        if llm_judge_bridge.probe(health_url, timeout=3):
+            mem.bridge_classifier = bridge_needs_wide
+            mem.wide_bridge = llm_judge_bridge.make_llm_judge(
+                api_url=CONFIG["api_url"])
+            mem.bridge_k_wide = CONFIG["bridge_k_wide"]
+        else:
+            # Fails visibly rather than silently: every wide-flagged query
+            # would otherwise sit on a 90s timeout against a dead server
+            # before pack()'s own try/except caught it. Checked once, here,
+            # instead of once per turn.
+            print("[qontext] LLM judge enabled but the server didn't answer "
+                  "%s at startup -- hard queries get plain retrieval only "
+                  "until it's reachable and the agent is restarted." %
+                  health_url)
+    return mem
 
 
 def save_memory(mem):

@@ -40,7 +40,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from qontext_memory import STOP, _stem, _words  # noqa: E402
-from rp_probe import load                       # noqa: E402
+# rp_probe reads the private roleplay logs (see its own docstring) and isn't
+# part of the public repo -- imported lazily, inside vocabulary() below,
+# which is the only thing that needs it. Loading a pre-built web from JSON
+# (bridge_bench.py's actual use of this module) never touches it, and
+# shouldn't be made to depend on a module that only exists in one tree.
 
 API_URL = "http://127.0.0.1:8080/v1/chat/completions"
 EXCLUDED = {"log8.txt", "log12.txt"}
@@ -163,6 +167,7 @@ def vocabulary(root, limit):
     Expanding the whole dictionary would be wasted generation: only words that
     appear in a user's turn can ever trigger an expansion at retrieval time.
     """
+    from rp_probe import load
     counts = Counter()
     for path in sorted(Path(root).glob("*.txt")):
         if path.name in EXCLUDED:

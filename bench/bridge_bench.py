@@ -36,6 +36,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LIVE = HERE.parent / "qontext-live"
+if not LIVE.is_dir():
+    # qontext-memory/bench layout: qontext_memory.py sits at the repo root
+    # instead of a sibling qontext-live/ folder.
+    LIVE = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(LIVE))
 
@@ -267,6 +271,32 @@ def bridge_affordance_rebuilt(mem):
     return bridge_affordance(mem, "affordance_turnbench.json")
 
 
+def bridge_llm_judge(mem, api_url=None, max_candidates=200, timeout=90):
+    """Ask the model, at query time, which stored facts it would need.
+
+    The mechanism itself lives in `llm_judge_bridge.py` (qontext-live/),
+    shared with `qontext_memory.py`'s production `wide_bridge` wiring, so
+    there is one implementation to trust rather than two that could drift.
+    See that module's docstring for what this does and why, and
+    RP_FINDINGS.md ("The LLM judge: the first mechanism to actually cross
+    script/consequence") for the numbers.
+
+    This wrapper only adds the bench-specific probe-and-SKIP convention:
+    every other arm that can be 'missing' (affordance web, weave) reports
+    SKIPPED with a reason instead of silently returning empty proposals, and
+    a down server needs to look the same way, not like "the mechanism ran
+    and found nothing."
+    """
+    sys.path.insert(0, str(LIVE))
+    from llm_judge_bridge import DEFAULT_API_URL, make_llm_judge, probe
+    api_url = api_url or DEFAULT_API_URL
+    if not probe(api_url.rsplit("/v1/", 1)[0] + "/health"):
+        return ("llama server not reachable at %s "
+                "(start it, --reasoning-budget 0)" % api_url)
+    return make_llm_judge(api_url=api_url, max_candidates=max_candidates,
+                          timeout=timeout)
+
+
 BRIDGES = [
     ("baseline (lexical only)", bridge_none, {}),
     ("write-time index terms", bridge_none, {"INDEX_TERMS": 10}),
@@ -276,6 +306,7 @@ BRIDGES = [
     ("weave (WikiText, pretrained)", bridge_weave_pretrained, {}),
     ("static emb (model2vec)", bridge_static, {}),
     ("contextual emb (MiniLM)", bridge_minilm, {}),
+    ("llm judge (query-time)", bridge_llm_judge, {}),
 ]
 
 
@@ -375,6 +406,7 @@ def main():
 
         problem = None
         per_suite = {}
+        diag_calls, diag_net, diag_errs, diag_trunc = 0, 0, [], False
         for sname, spairs in tb.SUITES:
             turn_hits, turn_all, seps, kinds = 0, 0, [], {}
             for cseed in conv_seeds:
@@ -397,6 +429,15 @@ def main():
                     if kind != "quiz":
                         turn_hits += got
                         turn_all += total
+                # Any instrument that talks to something outside the process
+                # (the LLM judge, so far) must be able to fail visibly. A
+                # server error and "the model said nothing relevant" both
+                # collapse to an empty proposal list -- this is the only
+                # thing that tells them apart.
+                diag_calls += getattr(propose, "calls", 0)
+                diag_net += getattr(propose, "network_calls", 0)
+                diag_errs += getattr(propose, "errors", [])
+                diag_trunc = diag_trunc or getattr(propose, "truncated", False)
             if problem:
                 break
             per_suite[sname] = (turn_hits, turn_all, min(seps), kinds)
@@ -421,6 +462,14 @@ def main():
                 line += "   %s %2d/%-2d (%2.0f%%) %4.1fx" % (
                     sname.split()[0], hits, total, 100.0 * hits / total, sep)
         print(line)
+        if diag_calls:
+            note = ("%d errors, e.g. %s" % (len(diag_errs), diag_errs[0])
+                    if diag_errs else "0 errors")
+            print("    %d proposal calls, %d actual server round-trips "
+                  "(rest cached), %s%s" % (
+                      diag_calls, diag_net, note,
+                      " -- pool truncated at max_candidates" if diag_trunc
+                      else ""))
         rows.append((label, failed, cells))
 
     for key, value in original.items():

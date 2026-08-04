@@ -55,8 +55,13 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+LIVE = HERE.parent / "qontext-live"
+if not LIVE.is_dir():
+    # qontext-memory/bench layout: qontext_memory.py sits at the repo root
+    # instead of a sibling qontext-live/ folder.
+    LIVE = HERE.parent
 sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parent / "qontext-live"))
+sys.path.insert(0, str(LIVE))
 
 import qontext_memory as qm                                     # noqa: E402
 from long_bench import (REPLIES, SUBJECTS, VERBS, TAILS,        # noqa: E402

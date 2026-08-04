@@ -36,6 +36,14 @@ Everything here has a hand-written answer key.
   control 7.5x. Caveat, not swept under the rug: suite A's control fails on
   one of three conversation seeds (4.4x, bar is 5.0x) even with this —
   open, unexplained, see "The next problem" below.
+- **LLM-judge-at-query-time**, gated (`llm_judge_bridge.py` +
+  `QontextMemory`'s `wide_bridge`, wired into `live_agent.py`): B 72% real
+  / 12.4× control, A 83% / 10.7–11.6×. First mechanism in the project to
+  cross script/consequence (B: script 7/12, consequence 6/12 — every prior
+  mechanism scored 0–3/12 on these two). Only runs on queries
+  `bridge_needs_wide()` flags — costs seconds per uncached query, so it is
+  never on the majority-narrow path. See "Open / pending" below for the
+  wiring detail.
 
 ## What is RETRACTED
 
@@ -180,6 +188,50 @@ produced obviously wrong ones.
 
 ## Open / pending
 
+- **LLM-judge-at-query-time — measured, and now wired into production,
+  gated.** `bridge_llm_judge` arm in `bridge_bench.py`: no precomputed
+  table, asks the 12B directly at query time which stored facts it needs
+  (candidate pool deliberately un-filtered by any lexical/embedding
+  shortlist, since that would silently drop the zero-vocabulary-overlap
+  items this arm exists to catch). Run twice on the user's own server (12B
+  instruct, 8192 ctx, `--reasoning-budget 0`): **B 72% real, control 12.4×;
+  A 83% real, control 10.7–11.6×** — both comfortably clear the 5.0× bar.
+  Per gap kind on B: hypernym 11/12 (was 0), script 7/12 (was 0),
+  consequence 6/12 (was 3), inference 5/9 (was 0) — script and consequence
+  had never moved under any of the six prior mechanisms tried across this
+  project, including two earlier runs of this exact benchmark. Instrumented
+  and checked: 0 errors, 123 real server round-trips, repeat run reproduced
+  identical real-hit counts. Full detail in `RP_FINDINGS.md`, "The LLM
+  judge...". **Real cost, not hidden:** seconds per uncached query vs.
+  microseconds for every other arm — this is why it is gated, not a
+  replacement for the embedding bridge.
+
+  **Wiring, done this round:**
+  - `qontext_memory.py`: new `wide_bridge` constructor param/attribute on
+    `QontextMemory`. `bridge_classifier` still decides narrow vs. wide;
+    when wide AND `wide_bridge` is set, `wide_bridge` runs INSTEAD of
+    `bridge` for that one call, at `bridge_k_wide`. Leaving `wide_bridge`
+    unset (the default) reproduces the previous adaptive-K behaviour
+    exactly — nothing about the existing shipped feature changed for
+    anyone not passing the new parameter. 7 new offline unit tests in
+    `test_qontext_memory.py` (105 total, all passing) check this
+    end-to-end with stub bridges: narrow queries never reach `wide_bridge`,
+    wide queries never reach the cheap `bridge`, a `bridge=None` +
+    `wide_bridge`-only configuration works (LLM-judge-only-on-hard-queries,
+    no embeddings needed), budget/exception safety hold.
+  - `llm_judge_bridge.py` (new, `qontext-live/`): the mechanism itself,
+    extracted out of `bridge_bench.py` into one importable module so
+    production and the benchmark share a single implementation instead of
+    two that could drift. `bridge_bench.py`'s `bridge_llm_judge` arm is now
+    a thin wrapper around it.
+  - `live_agent.py`: actually wired up — `bridge_classifier=
+    bridge_needs_wide`, `wide_bridge=llm_judge_bridge.make_llm_judge(...)`,
+    set on the loaded memory in `load_memory()`. Probes the server once at
+    startup and prints a visible warning (not a silent no-op) if it's
+    unreachable, rather than letting every wide-flagged turn eat a 90s
+    timeout. `CONFIG["llm_judge"] = False` disables it outright. No new
+    dependency: `bridge` stays `None`, so narrow queries cost nothing extra
+    — only the classifier-flagged minority ever reach the model.
 - **A/seed-7 control failure (4.4×)** — open research question, not an
   engineering blocker. See "The next problem, updated" above and
   `RP_FINDINGS.md` (bottom) for the full evidence chain. Next step if

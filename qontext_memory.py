@@ -1158,7 +1158,8 @@ class QontextMemory:
     def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="user",
                  weave=None, bridge=None, bridge_k=BRIDGE_K,
                  bridge_classifier=None, bridge_k_wide=BRIDGE_K_WIDE,
-                 bridge_budget_multiplier=BRIDGE_BUDGET_MULTIPLIER):
+                 bridge_budget_multiplier=BRIDGE_BUDGET_MULTIPLIER,
+                 wide_bridge=None):
         if not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive int")
         if speakers not in ("user", "all"):
@@ -1188,6 +1189,22 @@ class QontextMemory:
         self.bridge_classifier = bridge_classifier
         self.bridge_k_wide = max(0, int(bridge_k_wide))
         self.bridge_budget_multiplier = max(1.0, float(bridge_budget_multiplier))
+        # Optional second bridge, used INSTEAD of `bridge` only on queries
+        # `bridge_classifier` predicts wide, at `bridge_k_wide`. The point is
+        # a mechanism too expensive to run on every turn -- see
+        # llm_judge_bridge.py, the first bridge in this project's history to
+        # cross the script/consequence gap kinds, at a real cost of seconds
+        # per query rather than microseconds. Gating it here is what makes
+        # that cost survivable: most queries never reach it.
+        #
+        # Strictly opt-in, same discipline as bridge_classifier: leaving
+        # this None (the default) means every query that reaches the bridge
+        # section still calls plain `bridge`, exactly as before this
+        # existed, whether or not bridge_classifier is set. Setting `bridge`
+        # to None while `wide_bridge` is set is also valid -- narrow
+        # queries then get no bridge fill at all, and only the queries
+        # flagged wide ever pay for one.
+        self.wide_bridge = wide_bridge
         self._knots = []          # list of dicts: text, seq, hits, ts, w
         self._seen = set()        # exact-duplicate guard
         self._index = {}          # token -> {seq, ...} inverted index
@@ -1597,12 +1614,14 @@ class QontextMemory:
         """The densest set of relevant knots that fits in `budget` characters.
 
         Never exceeds the budget, never raises, returns "" when empty --
-        UNLESS both `bridge` and `bridge_classifier` are set and the
-        classifier predicts this query needs the wide net, in which case the
-        effective ceiling becomes `budget * bridge_budget_multiplier` for
-        this call only. Off by default: with `bridge_classifier=None` (the
+        UNLESS `bridge_classifier` is set (and `bridge` or `wide_bridge` is
+        too) and the classifier predicts this query needs the wide net, in
+        which case the effective ceiling becomes
+        `budget * bridge_budget_multiplier` for this call only, and if
+        `wide_bridge` was supplied it is used in place of `bridge` for that
+        one call. Off by default: with `bridge_classifier=None` (the
         default), this method's behaviour, including the hard budget
-        guarantee, is exactly what it was before this existed.
+        guarantee, is exactly what it was before either of those existed.
         """
         budget = max(0, int(budget))
         if not budget:
@@ -1616,9 +1635,18 @@ class QontextMemory:
             # having. See BRIDGE_K_WIDE for the measured trade -- this is not
             # a free win, it is a documented one with a known open failure
             # (RP_FINDINGS.md, suite A one-in-three-seeds control miss).
+            #
+            # `active_bridge` starts as the plain, cheap `bridge`. A wide
+            # verdict can both widen k/budget AND swap in `wide_bridge` (if
+            # one was supplied) -- the latter is what keeps an expensive
+            # mechanism like llm_judge_bridge off every turn: it only runs
+            # on the minority of queries the classifier flags, never on the
+            # ones `bridge` (or nothing) already handles fine.
             bridge_k = self.bridge_k
             effective_budget = budget
-            if (self.bridge is not None and self.bridge_classifier is not None
+            active_bridge = self.bridge
+            if (self.bridge_classifier is not None
+                    and (self.bridge is not None or self.wide_bridge is not None)
                     and (self.bridge_k or self.bridge_k_wide)):
                 try:
                     wide = bool(self.bridge_classifier(query))
@@ -1627,6 +1655,8 @@ class QontextMemory:
                 if wide:
                     bridge_k = self.bridge_k_wide
                     effective_budget = int(budget * self.bridge_budget_multiplier)
+                    if self.wide_bridge is not None:
+                        active_bridge = self.wide_bridge
 
             # A reserved slice, chosen by importance and not by the query.
             #
@@ -1717,14 +1747,14 @@ class QontextMemory:
             # It can add a fact the query had no word for; it can never
             # displace one the ranking asked for. Keeping it strictly
             # additive is what makes a failure attributable to reach.
-            if self.bridge is not None and bridge_k:
+            if active_bridge is not None and bridge_k:
                 total = len(packed)
                 chosen = packed.split("\n") if packed else []
                 seen = set(chosen)
                 try:
-                    proposed = self.bridge(query, [k["text"] for k in
-                                                   self._knots],
-                                           bridge_k)
+                    proposed = active_bridge(query, [k["text"] for k in
+                                                     self._knots],
+                                             bridge_k)
                 except Exception:
                     proposed = []          # a bridge must never break pack()
                 for text in proposed or []:

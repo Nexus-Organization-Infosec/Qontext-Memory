@@ -2145,3 +2145,112 @@ wrong on its own terms and stood uncorrected until this run.
 > seed count next to every ratio, and re-check old headline numbers when a
 > later run happens to use a different one, rather than assuming they'd
 > have agreed.**
+
+## The LLM judge: the first mechanism to actually cross script/consequence
+
+Six mechanisms had tried to bridge these two gap kinds and failed identically
+-- PPMI co-occurrence, static and contextual embeddings, an affordance web
+built by asking a model offline what a word applies to, cheap reranking of
+the embedding shortlist. All six encode a form of similarity, and script/
+consequence items are constructed to share no vocabulary with their query,
+so there is nothing for a similarity measure to find.
+
+`bridge_llm_judge`, added to `bridge_bench.py`, does something categorically
+different: no table, built at query time. It lists every stored fact and the
+query and asks the model directly which facts it would need to respond
+sensibly -- explicitly including facts "only implied by what would happen
+next," and deliberately un-filtered by any lexical or embedding shortlist
+first, since that would silently discard exactly the items this arm exists
+to catch. Chat endpoint, thinking disabled (`chat_template_kwargs:
+{"enable_thinking": false}`), temperature 0, following the API convention
+already established in `build_affordance_web.py`/`live_agent.py`.
+
+Run by the user against their own llama-server (12B instruct, 8192 ctx,
+`--reasoning-budget 0`) -- this arm cannot run from the sandbox:
+
+| | A (tuned-on) | B (HELD OUT) |
+|---|---|---|
+| baseline (lexical) | 14% | 21%, 12.8x |
+| llm judge | 83%, 10.7x | 72%, 12.4x |
+
+Per gap kind, suite B: **hypernym 11/12** (was 0/12), **reference 12/12**
+(was 9/12), **script 7/12** (was 0/12), **consequence 6/12** (was 3/12),
+**inference 5/9** (was 0/9). Script and consequence had never moved off
+0/12 and low-single-digits under any prior mechanism, including two runs of
+this same benchmark. Both suites clear the 5.0x control bar with room
+(10.7x/12.4x), and a repeat run reproduced the exact same real-hit counts
+(35/42, 41/57) -- only the shuffled-side number moved slightly (11.6x ->
+10.7x on A), consistent with the local server not being perfectly
+deterministic even at temperature 0, not with the mechanism being flaky.
+
+**Given a chance to fail visibly, and didn't.** `propose.errors` /
+`.network_calls` were wired into the report specifically because a 72%/83%
+number this good demanded checking whether it was silently propped up by
+errors returning empty (indistinguishable in the score from "the model
+looked and found nothing"). Second run: **1107 proposal calls, 123 actual
+server round-trips (the rest served from the per-arm query cache), 0
+errors.**
+
+**The real cost, not hidden:** 123 real network round-trips to a 12B model
+for one benchmark sweep (34 unique turn-shaped queries across both suites x
+~3.6 candidate-pool variants per query, caching collapses everything else).
+Every other arm in this file is microseconds; this one is seconds per
+uncached query. That cost is why this cannot simply replace the embedding
+bridge in production as-is -- the natural next step, not yet built, is
+gating it behind the already-shipped `bridge_needs_wide()` classifier, so
+the LLM is only asked on the minority of queries lexical retrieval is
+already estimated to fail on, rather than on every turn.
+
+## Gating the LLM judge behind bridge_needs_wide: wired into production
+
+The gate proposed above is now built. Three pieces:
+
+**`llm_judge_bridge.py` (new, `qontext-live/`).** The mechanism itself,
+pulled out of `bridge_bench.py` into its own importable module --
+`make_llm_judge(api_url, max_candidates, timeout)` returns the same
+`propose(query, knots, topk)` shape every bridge in this project uses, plus
+`probe(health_url)` for the up-front reachability check. `bridge_bench.py`
+now imports from it instead of carrying its own copy, so there is one
+implementation of the mechanism, not two that could quietly drift apart
+after the next edit to either.
+
+**`qontext_memory.py`: a new `wide_bridge` parameter on `QontextMemory`.**
+`bridge_classifier` still decides narrow vs. wide, exactly as before. What
+changes is what runs on a wide verdict: if `wide_bridge` is set, it runs
+INSTEAD of the plain `bridge` for that call, at `bridge_k_wide`; if left at
+its default (`None`), behaviour is byte-for-byte what adaptive-K already
+shipped -- the same `bridge`, just widened k/budget. `bridge=None` with
+`wide_bridge` set is also valid and deliberately supported: no cheap
+mechanism at all, judge-only-on-hard-queries, useful for exactly the
+live-agent case below where there's no embedding model in the loop.
+
+Seven new tests in `test_qontext_memory.py` (`TestWideBridge`, 105 total
+now, all passing) check this offline, with stub bridge functions instead of
+a real model: narrow queries never reach `wide_bridge`; wide queries never
+reach the cheap `bridge`; a `bridge=None`-plus-`wide_bridge` setup adds
+nothing on queries the classifier doesn't flag and something on the ones it
+does; a wide verdict's raised ceiling (`budget * bridge_budget_multiplier`,
+the pre-existing adaptive-K contract) still holds even when `wide_bridge`
+returns something far larger than any budget; an exception from
+`wide_bridge` cannot break `pack()`; a classifier exception falls back to
+the cheap `bridge`, never to `wide_bridge`. One test initially over-asserted
+-- expected `wide_bridge` output to respect the *plain* budget, not
+noticing the wide-verdict ceiling is already raised by design -- caught by
+running it, not assumed correct because it looked right.
+
+**`live_agent.py`: actually turned on.** `load_memory()` now probes the
+server once at startup (`llm_judge_bridge.probe`) and, if it answers, sets
+`bridge_classifier=bridge_needs_wide` and
+`wide_bridge=llm_judge_bridge.make_llm_judge(...)` on the loaded memory.
+If the probe fails, it prints a visible message and leaves both unset for
+that session, rather than letting the first wide-flagged turn discover the
+problem itself against a 90-second timeout. `bridge` stays `None` --
+narrow queries (the majority) get plain lexical retrieval exactly as
+before, at zero added cost or dependency; only the classifier-flagged
+minority ever reach the model. `CONFIG["llm_judge"] = False` turns the
+whole thing off. `--selftest` exercises `load_memory()` (no server present
+in that environment) and confirms the probe-failure path prints and does
+not raise.
+
+Full suite (105 unit tests, `bridge_bench.py` end-to-end smoke test, and
+`live_agent.py --selftest`) all pass after this wiring.

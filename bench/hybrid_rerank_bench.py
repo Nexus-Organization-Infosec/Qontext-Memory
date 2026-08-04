@@ -34,6 +34,10 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 LIVE = HERE.parent / "qontext-live"
+if not LIVE.is_dir():
+    # qontext-memory/bench layout: qontext_memory.py sits at the repo root
+    # instead of a sibling qontext-live/ folder.
+    LIVE = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(LIVE))
 
