@@ -80,6 +80,77 @@ def bridge_affordance(mem, filename="affordance_web.json"):
     return propose
 
 
+_WEAVE_CACHE = {}
+
+
+def _pretrained_weave(filename="weave.qw"):
+    if filename not in _WEAVE_CACHE:
+        sys.path.insert(0, str(LIVE))
+        from qontext_weave import WordWeave
+        path = LIVE / filename
+        _WEAVE_CACHE[filename] = (WordWeave.load(path) if path.exists()
+                                  else None)
+    return _WEAVE_CACHE[filename]
+
+
+def _weave_propose(weave, tokenize):
+    """Shared by both weave arms. `tokenize` is the weave's own tokenizer,
+    NOT qm._words/_stem -- the weave's vocabulary is raw lowercase words,
+    unstemmed, built by its own _tokens(). Looking it up with qm's stemmer
+    would silently miss almost everything through a tokenization mismatch
+    that has nothing to do with whether the mechanism works."""
+    def propose(query, knots, topk):
+        want = set()
+        for word in tokenize(query):
+            for other, _s in weave.related(word, limit=8, minimum=0.20):
+                want.add(other)
+        if not want:
+            return []
+        scored = []
+        for knot in knots:
+            klow = knot.lower()
+            overlap = sum(1 for w in want if w in klow)
+            if overlap:
+                scored.append((overlap, knot))
+        scored.sort(key=lambda p: -p[0])
+        return [k for _s, k in scored[:topk]]
+    return propose
+
+
+def bridge_weave_suite(mem):
+    """The co-occurrence weave, trained fresh on THIS suite's own stored
+    knots -- the same fairness move as affordance_web (rebuilt): no excuse
+    that it failed for lack of matching vocabulary, because it was built
+    from exactly the vocabulary being tested. Answers: does the mechanism
+    work at all, from a cold start, on a corpus this small (~170 knots)?
+    RP_FINDINGS.md already flagged this exact risk once before ("mechanism
+    proven, data starved") on a much larger corpus than this.
+    """
+    sys.path.insert(0, str(LIVE))
+    from qontext_weave import WordWeave, _tokens
+    weave = WordWeave()
+    for knot in mem.entries():
+        weave.learn(knot)
+    weave.prune()
+    return _weave_propose(weave, _tokens)
+
+
+def bridge_weave_pretrained(mem, filename="weave.qw"):
+    """The same mechanism, pre-seeded on 43.9M tokens of WikiText instead of
+    this suite's own vocabulary -- the "accumulated over many sessions"
+    condition the weave is actually designed for, per qontext_weave.py's own
+    docstring. Encyclopedic text, not conversational, so a real risk here is
+    domain mismatch rather than the mechanism itself; checked below rather
+    than assumed.
+    """
+    sys.path.insert(0, str(LIVE))
+    from qontext_weave import _tokens
+    weave = _pretrained_weave(filename)
+    if weave is None:
+        return "missing %s" % filename
+    return _weave_propose(weave, _tokens)
+
+
 _EMBED_CACHE = {}
 
 
@@ -201,6 +272,8 @@ BRIDGES = [
     ("write-time index terms", bridge_none, {"INDEX_TERMS": 10}),
     ("index terms OFF", bridge_none, {"INDEX_TERMS": 0}),
     ("affordance web (rebuilt)", bridge_affordance_rebuilt, {}),
+    ("weave (this suite)", bridge_weave_suite, {}),
+    ("weave (WikiText, pretrained)", bridge_weave_pretrained, {}),
     ("static emb (model2vec)", bridge_static, {}),
     ("contextual emb (MiniLM)", bridge_minilm, {}),
 ]

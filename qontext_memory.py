@@ -210,14 +210,17 @@ BRIDGE_K = 6
 # vectors, gated on the 5.0x shuffle control (RP_FINDINGS.md, "Adaptive K"):
 #
 #              flat K=6/budget800   flat K=30/budget1500   adaptive (this)
-#   A score          40%                14% FAILED(3.0x)      52%
-#   A control         6.2x               3.0x                 4.4x  BELOW BAR
-#   B score          40%                68%                   60%
-#   B control        19.2x               5.4x                 7.5x
-#   avg pack          ~400               1448 chars            821-1006 chars
+#   A score          40%            FAILED(3.0x)               52%
+#   A control         6.2x          FAILED(3.0x)                4.4x  BELOW BAR
+#   B score          40%            FAILED(4.4x)                60%
+#   B control        19.2x          FAILED(4.4x)                7.5x
+#   avg pack          ~400          1448 chars                  821-1006 chars
 #
-# Blanket K=30 buys B's best score but fails A's control outright and triples
-# the pack for every query. Gating on the classifier below gets most of the
+# Blanket K=30 fails control on BOTH suites at 3 seeds and triples the pack
+# for every query -- an earlier "B 68%, 5.4x" figure for this configuration
+# was 2-seed-optimistic and is retracted in RP_FINDINGS.md ("A correction,
+# found while running this"); the third seed alone drops B's control to
+# 4.4x. Gating on the classifier below gets most of blanket K=30's real
 # score at roughly half the pack cost and clears the control bar on B -- but
 # NOT on suite A, on one of three conversation seeds (4.4x, the other two
 # 4.9x/5.9x). That failure survived a classifier accuracy improvement

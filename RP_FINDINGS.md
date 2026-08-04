@@ -2044,3 +2044,104 @@ was because the thing that would have caught it -- calling the real method
 end to end and diffing against an independent implementation -- had never
 been done. Two external reimplementations agreeing with each other proved
 nothing about whether the actual shipped code path worked.
+
+---
+
+# The co-occurrence weave, re-tested against the current benchmark: still doesn't reach script/consequence
+
+`qontext_weave.py`'s `WordWeave` -- PMI-normalised co-occurrence within a
+12-token, sentence-bounded window, learned from raw text -- was measured
+extensively before (see "The vocabulary weave: mechanism proven, data
+starved" above), but only ever under `rp_turnbench.py`, the retracted
+benchmark. It had never been run through `bridge_bench.py` against the
+current suites with the current control. Two arms added, `weave (this
+suite)` and `weave (WikiText, pretrained)`.
+
+**`weave (this suite)`** -- trained fresh on `mem.entries()`, the same
+fairness move used for `affordance web (rebuilt)`. Checked before running
+the benchmark: `weave.stats()` on suite A's ~170 knots gives `{vocabulary:
+426, pairs: 1168, woven: 13, tokens: 656}` -- only 13 words survive pruning
+at all. Of the 14 turn-shaped queries, 13 get zero proposals; the one that
+gets any (`drink`) proposes a knot ("Fenna's standup is on Thursday") that
+has nothing to do with the query. Confirms the earlier "data starved"
+finding at a much smaller scale: this corpus is nowhere near enough text
+for the mechanism to have anything to say.
+
+**`weave (WikiText, pretrained)`** -- the 10MB `weave.qw`, 40,327 words,
+seeded from 43.9M tokens. Real vocabulary coverage this time, but a real
+domain-mismatch risk stated before running: WikiText is encyclopedic prose,
+not conversational text, so its co-occurrence patterns are topical
+(`shellfish` -> `oysters, mussels, clams`; `wine` -> `grapes, cabernet,
+sauvignon`), not situational. Some benchmark words aren't in it at all
+(`vegan`, `bechamel`, `trello`, `pager`).
+
+Budget 800, K=6, 3 seeds (the properly gated setting -- everything fails
+control at K=30/1500, see below):
+
+| arm | A | B | verdict |
+|---|---|---|---|
+| baseline (lexical) | 6/42 (14%) 6.9x | 12/57 (21%) 12.8x | -- |
+| weave (this suite) | 7/42 (17%) 6.2x | 12/57 (21%) 6.4x | A only -- OVERFIT |
+| weave (WikiText, pretrained) | 6/42 (14%) 5.3x | 15/57 (26%) 7.2x | B only |
+| static emb (model2vec) | 17/42 (40%) 6.2x | 23/57 (40%) 19.2x | generalises |
+
+Per gap kind, suite B:
+
+| arm | hypernym | reference | script | consequence | inference |
+|---|---|---|---|---|---|
+| baseline | 0/12 | 9/12 | 0/12 | 3/12 | 0/9 |
+| weave (this suite) | 0/12 | 9/12 | 0/12 | 3/12 | 0/9 |
+| weave (WikiText, pretrained) | **3/12** | 9/12 | **0/12** | **3/12** | 0/9 |
+| static emb | 5/12 | 9/12 | 0/12 | 3/12 | 6/9 |
+
+**Direct answer to the question this was built to answer: no.** Neither
+weave variant catches a single additional `script` item (0/12, both,
+unchanged from baseline) or a single additional `consequence` item (3/12,
+both, unchanged from baseline) -- the exact two categories the bridge exists
+for. The pretrained weave's entire +3 gain on B is concentrated in
+`hypernym`, a category static embeddings already cover better (5/12) and
+contextual embeddings cover much better (8/12, see earlier section).
+
+**Why, mechanistically, and not just "it didn't work":** `script` and
+`consequence` gaps need a pragmatic/causal link -- an event implies a
+constraint ("car's in the garage" implies "can't collect you Wednesday"),
+not a topical one. Co-occurrence-in-text, whether counted fresh or over
+43.9M WikiText tokens, encodes topical/encyclopedic relatedness --
+`shellfish` sits near `oysters` because articles about shellfish discuss
+oysters, the same relation `hypernym` gaps need (an instance sits near its
+category). It has no mechanism for "these two situations imply each other"
+because that relation isn't reliably signalled by two words sharing a
+sentence, at any corpus size. This is the same wall the affordance web hit
+from a different mechanism (typed, LLM-generated relations instead of
+counted ones) -- two structurally different approaches to word-relatedness,
+same two categories untouched by both.
+
+## A correction, found while running this: the earlier 68%/5.4x number was 2-seed-optimistic
+
+Re-running the full `bridge_bench.py` at K=30/budget=1500 with the project's
+own default of 3 seeds (7, 23, 99) rather than the 2 used when this number
+was first produced: `static emb (model2vec)` on suite B now shows
+**FAILED(4.4x)**, not 68% at 5.4x. Verified in isolation, seed by seed,
+with a script touching only `bridge_static`/`packer`/`score`/`control` --
+no contact with the weave arms added today:
+
+| seed | real | shuffled | ratio |
+|---|---|---|---|
+| 7 | 17 | 3.125 | 5.44x |
+| 23 | 17 | 2.875 | 5.91x |
+| 99 | 16 | 3.625 | **4.41x** |
+
+Worst-of-2 (seeds 7, 23) reproduces the original 5.4x exactly. Worst-of-3
+reproduces the FAILED 4.4x exactly. The original headline sampled only the
+two seeds that happened to clear the bar. **The 68%-held-out/5.4x-control
+figure for blanket K=30/budget=1500 is retracted as reported; the correct
+figure, at the seed count this project treats as standard everywhere else,
+is that this configuration fails its own control.** This does not change
+any shipping decision -- adaptive K was already chosen over blanket K=30 for
+independent reasons (RP_FINDINGS.md, "Adaptive K") -- but the number was
+wrong on its own terms and stood uncorrected until this run.
+
+> **Two-seed and three-seed numbers are not the same instrument. Report the
+> seed count next to every ratio, and re-check old headline numbers when a
+> later run happens to use a different one, rather than assuming they'd
+> have agreed.**

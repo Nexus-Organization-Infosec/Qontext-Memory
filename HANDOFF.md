@@ -84,7 +84,13 @@ default**, so the dependency-free claim survives.
 |---|---|---|
 | lexical | 14% | 21% |
 | + embeddings K=6 @800 | 43% | 42% |
-| + embeddings K=30 @1500 | — | **68%**, control 5.4× |
+| + embeddings K=30 @1500 | — | ~~68%, control 5.4×~~ **FAILED, control 4.4× at 3 seeds** |
+
+CORRECTION (see `RP_FINDINGS.md`, "A correction, found while running this"):
+the 68%/5.4× row above was measured on 2 conversation seeds. Re-run at this
+project's own standard of 3, the third seed alone drops the control to
+4.4× — below the bar. The row is struck through rather than deleted, on
+this project's own rule about not erasing a wrong number quietly.
 
 Generalises: +8 on A, +8 on B. Chat suites untouched.
 The affordance web is cleanly refuted (fails the control even after being
@@ -95,8 +101,8 @@ rebuilt over this benchmark's own vocabulary).
 
 ## The next problem, updated
 
-Three of the four "not yet tried" ideas from the previous handoff are now
-tried. Full detail and every number in `RP_FINDINGS.md` (bottom).
+All four "not yet tried" ideas from the previous handoff are now tried. Full
+detail and every number in `RP_FINDINGS.md` (bottom).
 
 **Reranking the top-30 cheaply: null, and explained.** Cosine + lexical
 (Jaccard) overlap, tuned on A, confirmed on B — flat at every weight tried,
@@ -105,13 +111,30 @@ share zero vocabulary with their query *by construction*, so there is no
 lexical signal in their neighbourhood to rerank with. Rules out query-side
 term weighting too (same wall).
 
+**The co-occurrence weave, re-tested against the current benchmark for the
+first time: also null on script/consequence.** `WordWeave` had only ever
+been measured under the retracted `rp_turnbench.py`. Added as two arms to
+`bridge_bench.py` — trained fresh on the suite's own knots (data-starved:
+only 13 words survive pruning out of 656 tokens, confirmed before scoring)
+and pre-trained on 43.9M WikiText tokens (real vocabulary, but topical —
+`shellfish`→`oysters/mussels`, not situational). Neither catches a single
+additional `script` (0/12, both) or `consequence` (3/12, both) item over
+plain lexical — the pretrained arm's only gain (+3 on B) is entirely in
+`hypernym`, a category embeddings already cover better. Mechanistically
+consistent with the affordance web's earlier, differently-caused failure on
+the same two categories: co-occurrence-in-text, counted or learned, encodes
+topical relatedness, not the pragmatic/causal link ("car's in the garage"
+implies "can't collect you Wednesday") those two gap kinds actually need.
+
 **Adaptive K: ships.** A cheap rule-based classifier estimates whether
 lexical is *likely to fail* (not which gap kind it is — exact-kind
 agreement is only 7-16%, but "will lexical fail" hits 89% recall/80%
 precision on A after two rounds of fixing it against the rank data, one of
 which caught a real bug). Gates K=6/budget 800 vs K=30/budget 1500 per
-query. Result: **B 60%, control 7.5× (clears the bar, beats blanket K=30's
-own 5.4× while using little more than half the pack). A 52%, control
+query. Result: **B 60%, control 7.5× (clears the bar; blanket K=30 itself
+now FAILS control at 4.4× once measured at 3 seeds, see the correction in
+"The live result" above — adaptive K is not just cheaper than blanket K=30,
+it is the only one of the two that passes at all). A 52%, control
 4.4× — still below the 5.0× bar**, on one of three conversation seeds
 (4.9×/5.9× on the other two). Should replace flat K=6 as the bridge default
 when the bridge is enabled.
