@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qontext — a conversational memory shaped like a quipu</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2e38; --text: #e6e8ef;
+    --muted: #9aa1b1; --accent: #7dd3fc; --accent-strong: #38bdf8;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 32px 20px 80px;
+  }
+  main { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; margin: 0 0 6px; }
+  .intro { color: var(--muted); max-width: 720px; margin-bottom: 8px; }
+  .intro strong { color: var(--text); }
+  .badge {
+    display: inline-block; font-size: 0.78rem; color: var(--accent);
+    border: 1px solid #234; background: #0d1e28; padding: 2px 8px;
+    border-radius: 999px; margin-bottom: 18px;
+  }
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 20px; }
+  @media (max-width: 860px) { .columns { grid-template-columns: 1fr; } }
+  label { display: block; font-size: 0.82rem; color: var(--muted); margin: 14px 0 5px; }
+  label:first-child { margin-top: 0; }
+  textarea, input[type=text] {
+    width: 100%; background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 10px 12px;
+    font-family: var(--mono); font-size: 13px; resize: vertical;
+  }
+  textarea:focus, input[type=text]:focus { outline: none; border-color: var(--accent-strong); }
+  input[type=range] { width: 100%; accent-color: var(--accent-strong); }
+  .range-row { display: flex; justify-content: space-between; font-size: 0.78rem; color: var(--muted); }
+  button {
+    margin-top: 16px; background: var(--accent-strong); color: #041017; border: none;
+    font-weight: 600; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 14px;
+  }
+  button:hover { background: var(--accent); }
+  .pack-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; font-family: var(--mono); font-size: 13px; white-space: pre-wrap;
+    min-height: 120px;
+  }
+  .stats { font-size: 13.5px; margin-top: 14px; }
+  table.report { border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  table.report td, table.report th {
+    border: 1px solid var(--border); padding: 4px 10px; text-align: right;
+  }
+  table.report th:first-child, table.report td:first-child { text-align: left; }
+  .ratio { color: var(--accent); font-weight: 700; margin-top: 8px; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+  ol.knots { font-family: var(--mono); font-size: 12.5px; color: var(--muted); padding-left: 22px; max-height: 320px; overflow-y: auto; }
+  ol.knots li { margin: 3px 0; }
+  footer { margin-top: 46px; color: var(--muted); font-size: 0.82rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  footer a { color: var(--accent); }
+  .hint { color: var(--muted); font-size: 0.82rem; margin-top: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Qontext</h1>
+  <p class="intro">
+    A conversational memory shaped like a <strong>quipu</strong> — the Inca recording
+    device, where meaning lived in knots on cords rather than in a transcript of
+    everything said. Facts are stored as short, self-contained statements, and each
+    prompt carries only the ones the question needs.
+  </p>
+  <p class="intro">
+    Paste a conversation as <code>speaker: message</code> lines, ask something about
+    it, and compare what gets sent. This page runs the actual retrieval code from the
+    repository, ported line-for-line to JavaScript and checked against the Python
+    implementation — nothing here is a mock-up, and no server is involved.
+  </p>
+  <span class="badge">100% client-side · no model, no network call</span>
+
+  <div class="columns">
+    <div>
+      <label for="conv">Conversation</label>
+      <textarea id="conv" rows="16"></textarea>
+
+      <label for="query">What the next prompt asks</label>
+      <input id="query" type="text" value="When is the report due?">
+
+      <label for="budget">Pack budget (characters): <span id="budgetVal"></span></label>
+      <input id="budget" type="range" min="60" max="1200" step="20" value="300">
+
+      <label for="pad">Bury it under this many turns of filler: <span id="padVal"></span></label>
+      <input id="pad" type="range" min="0" max="600" step="20" value="0">
+      <div class="hint">The transcript grows; the pack does not.</div>
+
+      <button id="go">Build the pack</button>
+    </div>
+
+    <div>
+      <label>What Qontext sends</label>
+      <div class="pack-box" id="packOut">—</div>
+      <div class="stats" id="statsOut"></div>
+      <details>
+        <summary>Every knot in memory</summary>
+        <ol class="knots" id="knotsOut"></ol>
+      </details>
+    </div>
+  </div>
+
+  <footer>
+    Token counts are the usual characters÷4 estimate — every model tokenises
+    differently, so treat them as indicative. The filler behind the slider is
+    synthetic and easier than real conversation.<br>
+    <a href="https://github.com/Nexus-Organization-Infosec/Qontext-Memory" target="_blank" rel="noopener">Source and full study</a>
+    · PolyForm Noncommercial 1.0.0
+  </footer>
+</main>
+
+<script type="module">
+import { QontextMemory } from '../qontext/qontext_chat.js';
+
+const SAMPLE = `user: Morning! Quick intro since we haven't talked before: people call me Marta.
+assistant: Nice to meet you, Marta. What shall we look at today?
+user: I'm based in Utrecht, near the old canal.
+assistant: Utrecht is lovely. Go on.
+user: I work as a nurse, mostly night shifts, so I reply at odd hours.
+assistant: Good to know, no rush on replies then.
+user: The traffic was horrible this morning, took me an hour to get home.
+assistant: An hour! That sounds exhausting after a night shift.
+user: Lately I code in Rust for fun, little command line things.
+assistant: Rust is a great choice for CLI tools.
+user: Oh before I forget: the sprint demo is on Friday at 10:00.
+assistant: Noted, sprint demo Friday at 10:00.
+user: Our project is codenamed heron-nest, silly name but it stuck.
+assistant: heron-nest, got it. Who picked that?
+user: Long story. Anyway, my dog is called Bikkel and he ate my charger cable.
+assistant: Bikkel sounds like a handful!
+user: He is. By the way, please keep explanations brief, I skim a lot.
+assistant: Will do, brief it is.
+user: Also important: the report is due March 3rd, hard deadline.
+assistant: March 3rd, noted as a hard deadline.
+user: We track tasks in Trello, in case you need to reference the board.
+assistant: Understood, Trello board it is.`;
+
+const CHARS_PER_TOKEN = 4.0;
+const SUBJECTS = ["the weather", "the tram", "my coffee", "the neighbours",
+    "that film", "the football", "this rain", "the new bakery",
+    "my headphones", "the traffic", "that podcast", "the garden"];
+const VERBS = ["was strange", "kept me up", "went cold", "made no sense",
+    "turned out fine", "was a disaster", "surprised me", "dragged on"];
+const TAILS = ["again", "this morning", "for once", "somehow", "as usual",
+    "of all things", "which was odd", "but never mind"];
+const REPLIES = ["Understood.", "Noted.", "That happens.", "Fair enough.", "I see.",
+    "Right.", "Makes sense.", "Good to know."];
+
+// Small seeded RNG so the filler is stable across a single page session
+// rather than genuinely random every click — mirrors the spirit of the
+// Python demo's fixed seed without needing bit-identical output (nothing
+// here is measured against it).
+function mulberry32(seed) {
+    return function () {
+        seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+const rnd = mulberry32(7);
+const choice = (arr) => arr[Math.floor(rnd() * arr.length)];
+
+function parse(text) {
+    const out = [];
+    for (let line of text.split('\n')) {
+        line = line.trim();
+        if (!line) continue;
+        const head = line.slice(0, 24);
+        const idx = head.indexOf(':');
+        if (idx !== -1) {
+            out.push([line.slice(0, idx).trim(), line.slice(idx + 1).trim()]);
+        } else {
+            out.push(['user', line]);
+        }
+    }
+    return out;
+}
+
+function pad(conversation, extraTurns) {
+    const out = [...conversation];
+    while (out.length < conversation.length + extraTurns) {
+        out.push(['user', `${choice(SUBJECTS)} ${choice(VERBS)} ${choice(TAILS)}, number ${out.length}.`]);
+        out.push(['assistant', choice(REPLIES)]);
+    }
+    return out;
+}
+
+const tokens = (text) => Math.floor(text.length / CHARS_PER_TOKEN);
+
+function report(transcript, packed) {
+    const tTok = Math.max(1, tokens(transcript)), pTok = tokens(packed);
+    const ratio = tTok / Math.max(1, pTok);
+    const share = (100 * pTok / tTok).toFixed(1);
+    return `
+      <table class="report">
+        <tr><th></th><th>full transcript</th><th>Qontext pack</th></tr>
+        <tr><td>characters</td><td>${transcript.length}</td><td>${packed.length}</td></tr>
+        <tr><td>tokens (approx)</td><td>${tTok}</td><td>${pTok}</td></tr>
+        <tr><td>share of the transcript</td><td>100%</td><td>${share}%</td></tr>
+      </table>
+      <div class="ratio">${ratio.toFixed(0)}x fewer tokens</div>`;
+}
+
+const conv = document.getElementById('conv');
+conv.value = SAMPLE;
+
+const budget = document.getElementById('budget');
+const budgetVal = document.getElementById('budgetVal');
+const padEl = document.getElementById('pad');
+const padVal = document.getElementById('padVal');
+const sync = () => { budgetVal.textContent = budget.value; padVal.textContent = padEl.value; };
+budget.addEventListener('input', sync);
+padEl.addEventListener('input', sync);
+sync();
+
+function run() {
+    let conversation = parse(conv.value);
+    if (!conversation.length) {
+        document.getElementById('packOut').textContent = 'Paste a conversation first.';
+        return;
+    }
+    conversation = pad(conversation, parseInt(padEl.value, 10));
+    const transcript = conversation.map(([w, t]) => `${w}: ${t}`).join('\n');
+
+    const memory = new QontextMemory();
+    for (const [who, said] of conversation) memory.observe(who, said);
+
+    const packed = memory.pack(document.getElementById('query').value || '', parseInt(budget.value, 10));
+    const stats = memory.stats();
+    const entries = memory.entries();
+
+    document.getElementById('packOut').textContent = packed || '(nothing matched — try another question)';
+    document.getElementById('statsOut').innerHTML =
+        `${conversation.length} turns → <strong>${memory.size} knots</strong>, ` +
+        `${stats.storedChars} stored characters from ${stats.observedChars} observed ` +
+        `(density ${(stats.storedChars / Math.max(1, stats.observedChars)).toFixed(2)})` +
+        report(transcript, packed);
+    document.getElementById('knotsOut').innerHTML =
+        entries.map((k) => `<li>${k.replace(/</g, '&lt;')}</li>`).join('');
+}
+
+document.getElementById('go').addEventListener('click', run);
+run();
+</script>
+</body>
+</html>

@@ -232,6 +232,77 @@ produced obviously wrong ones.
     timeout. `CONFIG["llm_judge"] = False` disables it outright. No new
     dependency: `bridge` stays `None`, so narrow queries cost nothing extra
     — only the classifier-flagged minority ever reach the model.
+
+  **Latency follow-up, this round:** tried a smaller judge model
+  (Qwen3.5-9B) — real control-clearing result, but it loses specifically on
+  script/consequence/inference (the categories this mechanism exists for)
+  while holding on hypernym/reference; verdict was to keep Gemma 4 12B. Then
+  swept `max_candidates` (50/100/200) with the 12B and, while diagnosing why
+  a smaller pool scored *higher* on B (a truncated pool should never gain
+  signal), found and fixed a real bug: the candidate slice was
+  `knots[:max_candidates]` — the OLDEST knots, not newest, since
+  `self._knots` is append-only. Any real session growing past 200 knots
+  would go permanently, silently blind to everything learned after that
+  point on the judge path. Fixed to `knots[-max_candidates:]`. Added
+  `test_llm_judge_bridge.py` (13 tests, this module had none before —
+  verified the new regression test actually catches the old bug by
+  reverting the fix and re-running it first).
+
+  Re-ran the pool sweep post-fix: pool 50/100 now add **zero** over plain
+  lexical retrieval on B (identical hit counts, every gap kind) — not
+  "worse," genuinely nothing. Cause: target facts sit at position <20 in a
+  ~170-knot store; a suffix slice at pool 50/100 keeps positions
+  ~70-170/~120-170, the opposite end. Pool 200 is untouched (170 knots fit
+  under a 200 cap either direction). **Neither truncation direction is
+  actually correct** — prefix (the bug) permanently hides new facts past
+  the cap, suffix (the fix) permanently hides old-but-important ones,
+  exactly what `PACK_RESERVE` exists to protect against in the lexical
+  pack, with no equivalent for the bridge's candidate pool yet. Suffix
+  stays the safer of two blind options, not a solved problem. Real fix
+  would blend recency with importance; not built. **Verdict: don't shrink
+  `max_candidates` below what needs to stay visible — 200 stays the
+  setting** until importance-aware selection exists. Timing remains
+  unclean (still non-monotonic across the sweep) and is now moot for this
+  round regardless. Full detail: `RP_FINDINGS.md`, "Trying a smaller judge
+  model...", "The candidate-pool sweep found a shipped bug...", "Re-run
+  post-fix: pool truncation... is a dead end without importance-weighting".
+
+  **Importance-aware selection — built this round, not yet measured.**
+  `QontextMemory.candidates(limit)`: sorts by `(imp desc, seq desc)`, the
+  same key `PACK_RESERVE` already uses for the lexical pack's reserved
+  slice, reused for the bridge's candidate pool. Escapes both blind
+  failure modes in principle — importance first beats the old prefix bug
+  (a high-value old fact no longer vanishes), recency-as-tiebreak beats the
+  current suffix behaviour (fresh, equally-unimportant facts still
+  surface). Wired narrowly: only `wide_bridge`'s call in `pack()` uses it;
+  `bridge` (embeddings, weave — already-proven arms) is untouched, still
+  sees every knot in original order, unchanged from what was measured
+  before. `bridge_bench.py`'s llm-judge sweep arms now measure the same
+  selection via a `candidates_fn` hook on `packer()` (default `None`, every
+  other arm unaffected). 7 new tests (127 total, passing). **Not yet
+  benchmarked** — re-run `--llm-judge-candidates` is the actual test of
+  whether this recovers small-pool accuracy; expect even the pool=200 row
+  to shift slightly too, since candidate ORDER changed even though the SET
+  didn't. See `RP_FINDINGS.md`, "Importance-aware candidate selection:
+  built, not yet measured".
+
+  **Measured.** Real recovery, not full recovery: B went 21%/21% (recency
+  fix, zero added value) -> 42%/42% at pool 50/100, vs. 65% at pool 200
+  (effectively uncapped on this ~170-knot store). Pool 50 and pool 100
+  scored identically on every gap kind, exactly — the importance sort
+  front-loads everything that scores above default into the first ~50
+  slots, so doubling the pool adds only more default-importance filler,
+  nothing that changes the answer. `_importance()` is a real, useful,
+  partial signal (recovered the standing-fact gap recency alone couldn't),
+  not an oracle for what a later query needs. **Three separate levers now
+  tried for the original latency question — smaller model, blind pool
+  shrink, importance-aware pool shrink — converge on the same answer at
+  this project's current scale: the zero-risk win (`cache_prompt`) is the
+  win, and every further reduction has had a real, measured accuracy cost.
+  Recommending this thread stop here** unless the store genuinely outgrows
+  200 knots in practice, at which point the importance-aware fallback is
+  the one to lean on. See `RP_FINDINGS.md`, "Measured: real recovery, not
+  full recovery, and a clean explanation why".
 - **A/seed-7 control failure (4.4×)** — open research question, not an
   engineering blocker. See "The next problem, updated" above and
   `RP_FINDINGS.md` (bottom) for the full evidence chain. Next step if
@@ -256,7 +327,33 @@ produced obviously wrong ones.
 - **Unpushed commits.** `git push origin main` from
   `quipu-experiment/qontext-memory`. The sandbox cannot authenticate; this has
   to be run on the user's machine.
-- **HF Space** still blocked by the abuse-handler flag; appeal not confirmed.
+- **HF Space (`Trobi/qontext`) — resolved, then invalidated by a policy
+  change, then rebuilt as a static demo.** The abuse flag was lifted and the
+  Space updated to current `qontext_memory.py`/`qontext_rp.py`/`qontext_cords.py`
+  (merged via `--allow-unrelated-histories -X ours`, since the Space's git
+  history originated from the web UI). It then failed at runtime
+  ("No @spaces.GPU function detected") because it was pinned to ZeroGPU;
+  downgrading to `cpu-basic` turned out to require a PRO subscription — as of
+  Aug 2026, HF requires PRO for **any** Gradio/Docker Space, even free-tier
+  CPU. Only fully static Spaces remain free. The user deleted the old Space.
+  Fix: `extension/qontext/qontext_chat.js` is a new, parity-tested JS port of
+  `QontextMemory` (the "Assistant chat" tab only — `RPMemory`/roleplay was
+  already ported in `qontext.js` but is not included in this demo, by the
+  user's choice, to avoid porting two classes for one demo). Every helper
+  function (`stem`, `words`, `splitSentences`, `frame`, `importance`, ...)
+  and every vocabulary table were already shared with the existing RP port
+  (`qontext_rp.py` imports its vocabulary from `qontext_memory.py` in
+  Python), so only the extraction admission rule and the `QontextMemory`
+  class itself needed porting. `parity_chat.mjs` / `build_chat_cases.py`
+  check it against Python (50/50 checks passing across three scenarios:
+  the sample conversation, question/second-person filtering, and
+  supersession/eviction). The demo itself lives in
+  `extension/demo/index.html` and a deploy-ready copy (with the import path
+  rewritten for a Space root) is staged in `qontext-static-space/`. Not yet
+  pushed — needs `hf repo create Trobi/qontext --type space --sdk static`
+  (no `--flavor`, so no PRO paywall) run on the user's machine, then the
+  staged files copied into a fresh clone and pushed. Exact commands were
+  given in chat.
 - **The paper's ten references** have never been verified.
 - `affordance_turnbench.json` needs the local llama server to regenerate
   (`--reasoning-budget 0`, chat endpoint).
