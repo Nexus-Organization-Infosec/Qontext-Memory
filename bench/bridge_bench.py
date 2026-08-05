@@ -29,6 +29,7 @@ already fails this way at 0.7x; it is not a hypothetical.
 """
 
 import argparse
+import functools
 import random
 import statistics
 import sys
@@ -312,15 +313,22 @@ BRIDGES = [
 
 # ------------------------------------------------------------------ harness
 
-def packer(mem, propose, topk):
-    """Lexical pack first, then the bridge's proposals while budget remains."""
+def packer(mem, propose, topk, candidates_fn=None):
+    """Lexical pack first, then the bridge's proposals while budget remains.
+
+    `candidates_fn(mem) -> [knot text]` overrides what the bridge is shown
+    in place of the default `mem.entries()` (insertion order, unbounded).
+    Only the llm-judge arms pass one -- see `_llm_judge_variant` -- so
+    every other arm's already-measured numbers are untouched by this.
+    """
     def pack(query, budget):
         base = mem.pack(query, budget)
         if propose is None:
             return base
         used = len(base)
         chosen = list(base.split("\n")) if base else []
-        for knot in propose(query, mem.entries(), topk):
+        pool = candidates_fn(mem) if candidates_fn else mem.entries()
+        for knot in propose(query, pool, topk):
             if knot in chosen:
                 continue
             cost = len(knot) + (1 if chosen else 0)
@@ -371,10 +379,37 @@ def main():
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--control-seeds", type=int, default=8)
+    ap.add_argument("--llm-judge-candidates", default="200",
+                    help="comma-separated max_candidates values to sweep "
+                         "for the llm judge arm, e.g. 50,100,200. The "
+                         "candidate list is the expensive part of that "
+                         "call (see llm_judge_bridge.py) -- this is what "
+                         "lets you trade recall for latency with the model "
+                         "held fixed, instead of swapping models. Default "
+                         "reproduces the single arm exactly as before.")
     args = ap.parse_args()
 
     conv_seeds = [7, 23, 99][:args.seeds]
     ctrl_seeds = list(range(1, args.control_seeds + 1))
+
+    # One row per pool size. With the default single value this is
+    # byte-for-byte the static BRIDGES list that shipped before this sweep
+    # existed -- same label, same behaviour.
+    candidate_sizes = [int(n) for n in
+                       args.llm_judge_candidates.split(",") if n.strip()]
+    bridges = [b for b in BRIDGES if not b[0].startswith("llm judge")]
+    for n in candidate_sizes:
+        label = ("llm judge (query-time)" if len(candidate_sizes) == 1
+                 else "llm judge (pool=%d)" % n)
+        made = functools.partial(bridge_llm_judge, max_candidates=n)
+        # Measure the same importance+recency candidate selection
+        # production uses (QontextMemory.candidates()), not the raw
+        # insertion-order entries() every other arm gets -- otherwise this
+        # sweep would be testing a selection nothing in production
+        # actually uses. See RP_FINDINGS.md, the candidate-pool sweep
+        # entries, for why that distinction mattered here specifically.
+        made.candidates_fn = lambda mem, n=n: mem.candidates(n)
+        bridges.append((label, made, {}))
 
     print("bridge_bench: budget %d, top-%d proposals, %d conversation seeds"
           % (args.budget, args.topk, len(conv_seeds)))
@@ -397,7 +432,7 @@ def main():
 
     original = {k: getattr(qm, k) for k in ("INDEX_TERMS",)}
     rows = []
-    for label, make, overrides in BRIDGES:
+    for label, make, overrides in bridges:
         for key, value in overrides.items():
             setattr(qm, key, value)
         for key, value in original.items():
@@ -406,7 +441,8 @@ def main():
 
         problem = None
         per_suite = {}
-        diag_calls, diag_net, diag_errs, diag_trunc = 0, 0, [], False
+        diag_calls, diag_net, diag_errs, diag_trunc, diag_secs = (
+            0, 0, [], False, 0.0)
         for sname, spairs in tb.SUITES:
             turn_hits, turn_all, seps, kinds = 0, 0, [], {}
             for cseed in conv_seeds:
@@ -417,7 +453,9 @@ def main():
                 if isinstance(propose, str):
                     problem = propose
                     break
-                pack = packer(mem, propose, args.topk)
+                pack = packer(mem, propose, args.topk,
+                              candidates_fn=getattr(make, "candidates_fn",
+                                                    None))
                 real, by_kind = score(pack, args.budget,
                                       lambda i: spairs[i][1], spairs, mem)
                 shuf = control(pack, args.budget, ctrl_seeds, spairs, mem)
@@ -438,6 +476,7 @@ def main():
                 diag_net += getattr(propose, "network_calls", 0)
                 diag_errs += getattr(propose, "errors", [])
                 diag_trunc = diag_trunc or getattr(propose, "truncated", False)
+                diag_secs += getattr(propose, "seconds", 0.0)
             if problem:
                 break
             per_suite[sname] = (turn_hits, turn_all, min(seps), kinds)
@@ -465,11 +504,16 @@ def main():
         if diag_calls:
             note = ("%d errors, e.g. %s" % (len(diag_errs), diag_errs[0])
                     if diag_errs else "0 errors")
+            avg_ms = 1000.0 * diag_secs / diag_net if diag_net else 0.0
             print("    %d proposal calls, %d actual server round-trips "
                   "(rest cached), %s%s" % (
                       diag_calls, diag_net, note,
                       " -- pool truncated at max_candidates" if diag_trunc
                       else ""))
+            print("    %.1fs total in real network calls, %.0fms avg per "
+                  "round-trip -- this is the number a smaller model or a "
+                  "smaller candidate pool is supposed to move" % (
+                      diag_secs, avg_ms))
         rows.append((label, failed, cells))
 
     for key, value in original.items():

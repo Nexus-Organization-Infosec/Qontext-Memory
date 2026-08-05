@@ -235,6 +235,15 @@ BRIDGE_K = 6
 BRIDGE_K_WIDE = 30
 BRIDGE_BUDGET_MULTIPLIER = 1.875     # 1500 / 800, the measured setting
 
+# How many candidates `wide_bridge` gets shown, via `candidates()`
+# (importance+recency ordered) rather than the full `entries()` list --
+# only relevant once a session has grown past this many knots. Matches
+# llm_judge_bridge.py's own default `max_candidates`, since that is the
+# limit this exists to feed sensibly rather than blindly. See
+# RP_FINDINGS.md, the candidate-pool sweep entries, for why neither a
+# prefix nor a suffix slice of raw `entries()` was safe to ship instead.
+BRIDGE_CANDIDATE_LIMIT = 200
+
 # A cheap classifier estimating whether lexical retrieval is likely to fail
 # for this query -- NOT which gap kind it is. Exact gap-kind agreement
 # against the written taxonomy (hypernym/script/consequence/inference) was
@@ -1159,7 +1168,8 @@ class QontextMemory:
                  weave=None, bridge=None, bridge_k=BRIDGE_K,
                  bridge_classifier=None, bridge_k_wide=BRIDGE_K_WIDE,
                  bridge_budget_multiplier=BRIDGE_BUDGET_MULTIPLIER,
-                 wide_bridge=None):
+                 wide_bridge=None,
+                 wide_candidate_limit=BRIDGE_CANDIDATE_LIMIT):
         if not isinstance(max_entries, int) or max_entries < 1:
             raise ValueError("max_entries must be a positive int")
         if speakers not in ("user", "all"):
@@ -1205,6 +1215,13 @@ class QontextMemory:
         # queries then get no bridge fill at all, and only the queries
         # flagged wide ever pay for one.
         self.wide_bridge = wide_bridge
+        # How many candidates `wide_bridge` is shown, via `candidates()`
+        # (importance+recency ordered), once the memory holds more knots
+        # than this. See BRIDGE_CANDIDATE_LIMIT. Irrelevant to `bridge`
+        # (the cheap path), which always sees every knot -- this only
+        # matters for a bridge too expensive to hand the entire store.
+        self.wide_candidate_limit = (None if wide_candidate_limit is None
+                                     else max(0, int(wide_candidate_limit)))
         self._knots = []          # list of dicts: text, seq, hits, ts, w
         self._seen = set()        # exact-duplicate guard
         self._index = {}          # token -> {seq, ...} inverted index
@@ -1449,6 +1466,38 @@ class QontextMemory:
         """All stored knots, oldest first."""
         with self._lock:
             return [k["text"] for k in self._knots]
+
+    def candidates(self, limit=None):
+        """Knot texts ordered by (importance desc, recency desc) and
+        optionally capped at `limit` -- NOT insertion order, unlike
+        `entries()`.
+
+        Built for a bridge that cannot afford to see every knot (the LLM
+        judge: each one costs prompt tokens, not a vector lookup) but still
+        needs a chance at whichever ones matter. The two naive alternatives
+        both fail in a different, real way once a session outgrows the
+        limit: a prefix slice of `entries()` hides everything learned
+        afterward, forever; a suffix slice hides everything established
+        earlier and never mentioned since -- exactly the kind of standing
+        fact `PACK_RESERVE` exists to protect in the lexical pack, with
+        nothing playing that role for a bridge's candidates. This reuses
+        the same `(imp, seq)` sort `PACK_RESERVE`'s reserved slice already
+        uses, so a high-importance fact from last month still outranks a
+        low-importance one from an hour ago, while knots tied on importance
+        fall back to recency -- fresh information still surfaces instead of
+        being silently starved by something old and equally unimportant.
+
+        Both this project's `RP_FINDINGS.md` entries on the candidate-pool
+        sweep are the reason this exists: neither blind truncation
+        direction was measured to work, only this one hadn't been tried.
+        """
+        with self._lock:
+            ranked = sorted(self._knots,
+                            key=lambda k: (k.get("imp", 1.0), k["seq"]),
+                            reverse=True)
+            if limit is not None:
+                ranked = ranked[:max(0, int(limit))]
+            return [k["text"] for k in ranked]
 
     def __len__(self):
         """Number of knots.
@@ -1751,10 +1800,17 @@ class QontextMemory:
                 total = len(packed)
                 chosen = packed.split("\n") if packed else []
                 seen = set(chosen)
+                # `bridge` (cheap) always sees every knot -- it costs a
+                # vector lookup, not prompt tokens, so there is nothing to
+                # curate. `wide_bridge` gets the importance+recency
+                # selection instead: see candidates() for why neither a
+                # prefix nor a suffix slice of raw entries() was safe.
+                if active_bridge is self.wide_bridge:
+                    candidate_knots = self.candidates(self.wide_candidate_limit)
+                else:
+                    candidate_knots = [k["text"] for k in self._knots]
                 try:
-                    proposed = active_bridge(query, [k["text"] for k in
-                                                     self._knots],
-                                             bridge_k)
+                    proposed = active_bridge(query, candidate_knots, bridge_k)
                 except Exception:
                     proposed = []          # a bridge must never break pack()
                 for text in proposed or []:

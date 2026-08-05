@@ -2254,3 +2254,274 @@ not raise.
 
 Full suite (105 unit tests, `bridge_bench.py` end-to-end smoke test, and
 `live_agent.py --selftest`) all pass after this wiring.
+
+## Trying a smaller judge model: Qwen3.5-9B loses exactly where it matters
+
+The production model is `gemma-4-12B-it-uncensored-Q8_0.gguf`. Before
+touching the mechanism itself, checked whether a smaller model could match
+it -- IFEval (instruction-following, self-reported/unverified,
+llm-stats.com) put Qwen3.5-9B at 0.915 against an estimated ~0.889 for
+Gemma-3-class 12B models, so the hypothesis was plausible on paper.
+Swapped it in (same quant tier, Q8_0), re-ran `bridge_bench.py` unchanged:
+
+| | A (tuned-on) | B (HELD OUT) |
+|---|---|---|
+| Gemma 4 12B (baseline) | 83%, 10.7-11.6x | 72%, 12.4x |
+| Qwen3.5-9B | 76%, 9.2x | **54%, 11.2x** |
+
+Both still clear the control bar, so this is a real signal, not noise. Per
+gap kind on B: hypernym 11/12 (unchanged), reference 12/12 (unchanged),
+**script 3/12 (was 7/12), consequence 4/12 (was 6/12), inference 1/9 (was
+5/9)**. The categories that held are the ones closer to definitional/
+structural matching; the ones that dropped are exactly the ones this whole
+mechanism was built for -- reasoning about what a situation implies, not
+matching against instructions. This is the caveat from when the model swap
+was first proposed, now measured instead of assumed: IFEval scores format
+compliance, not this specific kind of implicit reasoning, and a model can
+lead on the former while losing on the latter.
+
+**A real gap in the experiment, caught before drawing a conclusion from
+it:** this whole exercise was about latency, and nothing had measured
+latency -- only accuracy. `llm_judge_bridge.py`'s `propose` now carries a
+`.seconds` attribute (wall-clock time inside real network calls only, not
+cached replays), wired into `bridge_bench.py`'s report as total seconds and
+average ms/round-trip. Not yet re-run with this in place, so there is no
+number yet for whether Qwen3.5-9B was actually faster -- the accuracy loss
+on script/consequence/inference makes that close to moot for this
+particular candidate, but the instrumentation is now there for the next
+one.
+
+**Verdict: Gemma 4 12B stays the judge model.** Given the fallback plan
+from when this was first proposed -- "if results are negative or impacting
+speed/accuracy too much we try shrinking the candidate pool separately with
+the model we currently use" -- this is the negative case. Next lever is
+`max_candidates`, not the model.
+
+## The candidate-pool sweep found a shipped bug, not just a speed/accuracy trade
+
+`bridge_bench.py --llm-judge-candidates 50,100,200`, Gemma 4 12B, three
+pool sizes:
+
+| pool | A real / control | B real / control | avg ms/round-trip |
+|---|---|---|---|
+| 50  | 81%, 8.6x  | **84%**, 13.3x | 2044ms |
+| 100 | 81%, 10.0x | 74%, 16.0x     | 1053ms |
+| 200 | 86%, 11.6x | 72%, 12.4x     | 1424ms |
+
+Two things about this table don't fit the expected shape, and both turned
+out to be real, not noise.
+
+**The timing isn't monotonic.** Pool 50 -- the smallest candidate list --
+was the *slowest* per round-trip, not the fastest. The three pool sizes ran
+sequentially against one freshly-started server in this run; pool 50 went
+first and most plausibly absorbed a cold-start cost (weight/KV-cache
+warmup) that has nothing to do with candidate-list size. These specific
+ms/round-trip numbers are not trusted as a clean signal and should not be
+read as "smaller pool is slower" -- re-run with the arms in randomized
+order, or a throwaway warm-up call before timing starts, before trusting
+any timing comparison from this sweep.
+
+**Pool 50 scored HIGHER than pool 200 on B, which a pure truncation
+mechanism should never do -- checked before believing it.** A truncated
+pool can only remove candidates, never add signal, so a real accuracy gain
+from truncating needed an explanation, not a shrug. Wrote a standalone
+diagnostic (no server, no LLM call) that rebuilds the same suites and
+conversation seeds `bridge_bench.py` uses and finds, for every item, the
+stored position of its answer-bearing knot:
+
+    suite A, seed 7: 17 of 18 answer knots at position <20 (170 total knots)
+    suite B, seed 7: 23 of 24 answer knots at position <20 (172 total knots)
+    (script/consequence/hypernym/reference items cluster in positions 0-15
+    in every seed of both suites; only `inference` items sometimes land
+    far out, once even missing the store entirely)
+
+`turn_bench.py`'s synthetic conversations plant target facts early and pad
+the rest with filler. A pool of 50 barely touches the answer-bearing knots
+in this benchmark's own construction -- it mostly strips out well over a
+hundred irrelevant filler-derived candidates the judge would otherwise have
+to read past. That is a plausible, real "less distraction, better
+selection" effect, and also a benchmark-construction artifact that would
+not obviously reproduce on a live, organically-grown `qontext.qx` where a
+needed fact could be knot #400 as easily as knot #4.
+
+**Looking for that explanation surfaced an actual bug.**
+`llm_judge_bridge.py`'s `propose()` sliced the candidate pool with
+`knots[:max_candidates]` -- the FIRST max_candidates knots.
+`qontext_memory.py`'s `self._knots` is a plain append-only list (verified
+by reading `observe()`), so this took the OLDEST knots, not the newest.
+Once any real session accumulates more knots than `max_candidates` (200 by
+default), the judge would go permanently blind to everything learned after
+that point -- silently, for the life of that memory file, with only the
+already-tracked-but-never-surfaced `.truncated` flag as a trace. This
+benchmark run never exposed it because the synthetic suites happen to keep
+their answer-bearing knots near the front regardless of pool size. A real,
+organically growing conversation has no such guarantee.
+
+**Fixed:** the slice is now `knots[-max_candidates:]` -- most recent, not
+oldest. Cost: the `cache_prompt` prefix-stability the earlier speed fix
+relied on now only holds between calls where no new knot was learned in
+between (the FACTS block slides once the memory exceeds max_candidates,
+rather than growing forever) -- still the common case, since most turns
+produce no new knot at all, but no longer indefinite. Correctness over
+cache stability was not a close call here.
+
+Added `test_llm_judge_bridge.py` (13 tests, new file -- this module had
+only ad hoc scratch verification before, never a committed test), including
+a regression test for this exact bug: builds 500 synthetic knots, truncates
+to 10, and asserts the model was shown knots 490-499, not 0-9. Verified the
+test actually catches the regression by reverting the fix locally and
+re-running it (failed, as expected) before restoring the fix (passed).
+
+**Not yet re-run:** the fix changes which candidates are even visible at
+small pool sizes, so the table above is now stale for pool=50 and
+pool=100 (pool=200 was never affected -- suite sizes here are well under
+200 knots, so prefix and suffix slicing were identical at that setting).
+Expect pool 50/100's numbers to change, plausibly down, once measured
+against the corrected slice, precisely because this benchmark's synthetic
+construction front-loads the facts that matter -- the "less distraction"
+effect may partly or fully have been "the truncation accidentally kept the
+right answers," which the fix does not preserve as a side effect anymore.
+
+## Re-run post-fix: pool truncation, in either direction, is a dead end without importance-weighting
+
+| pool | A real / control | B real / control | B per kind |
+|---|---|---|---|
+| 50  | 19%, 8.0x | 21%, 12.8x | identical to baseline on every kind |
+| 100 | 19%, 7.0x | 21%, 12.8x | identical to baseline on every kind |
+| 200 | 86%, 11.6x | 72%, 12.4x | hypernym 11/12, script 7/12, consequence 6/12, inference 5/9 |
+
+Not "worse" -- pool 50 and pool 100 now add **exactly zero** over plain
+lexical retrieval on B (12/57 either way, identical hypernym/script/
+consequence/inference counts to baseline). The judge is running, costing
+real seconds, and contributing nothing.
+
+Cause is the flip side of the bug just fixed. The diagnostic from the
+previous entry already showed target facts sit at position <20 in a
+~170-knot store. A suffix slice at pool=50/100 keeps positions
+~120-170/~70-170 -- the *opposite* end from where the facts are. Pool=200
+was untouched because 170 total knots fit inside a 200 cap entirely, prefix
+or suffix, so it is the only row still measuring the mechanism rather than
+measuring which end of the list got cut.
+
+**This means neither naive truncation direction is actually correct.** A
+prefix slice (the bug) permanently hides everything NEW past the cap. A
+pure suffix slice (the fix) permanently hides everything OLD past the cap,
+including exactly the kind of standing fact -- established once, referenced
+much later -- this project's own `PACK_RESERVE` mechanism exists to protect
+in the *lexical* pack. The judge's candidate pool has no equivalent
+protection. Suffix is still the safer default of the two blind options (new
+information should not vanish forever the way old information already can
+in normal conversation), but "safer than a worse bug" is not the same as
+"solved." A real fix would blend recency with importance -- the same kind
+of signal `PACK_RESERVE`'s reserved slice already uses for the lexical
+pack, not yet extended to the bridge's candidate selection. Not built.
+
+**Timing is still not clean.** Pool 100 was fastest again (1480ms),
+neither pool 50 (2530ms) nor pool 200 (1924ms) fit a monotonic story.
+Three pool sizes run sequentially against one server session is not a
+controlled timing experiment; it hasn't been fixed because the accuracy
+result made it moot for this round -- there is nothing to time-optimize in
+a configuration that also throws away the signal.
+
+**Verdict: don't shrink `max_candidates` below the size of what actually
+needs to be visible.** For a store this size, that means 200 (or higher)
+stays the setting. Shrinking further needs importance-aware selection
+built first, not a smaller number tried next.
+
+## Importance-aware candidate selection: built, not yet measured
+
+The blend proposed above is built. `QontextMemory.candidates(limit)` sorts
+by `(imp desc, seq desc)` -- the exact same key `PACK_RESERVE`'s reserved
+slice already uses for the lexical pack, reused here for a different
+purpose: which knots a bridge too expensive to see everything gets shown.
+Importance first means a high-importance fact from last month still
+outranks a low-importance one from an hour ago (the failure the recency-only
+fix couldn't avoid); recency as the tiebreak among equally-important knots
+means fresh information still surfaces instead of being crowded out by
+something old and equally unimportant (the failure the original prefix bug
+couldn't avoid). Neither blind direction alone escapes both failure modes;
+this does, in principle -- not yet checked against the benchmark.
+
+Wired narrowly, not broadly: only `wide_bridge`'s call inside `pack()` was
+changed to use `candidates()` instead of the full knot list. `bridge` (the
+cheap path -- embeddings, weave, in this project's own arms) is completely
+untouched, still gets every knot in original order, exactly as measured
+before this existed. Changing what an already-proven mechanism sees without
+re-measuring it was not a risk worth taking to fix a problem it doesn't
+have.
+
+`bridge_bench.py`'s llm-judge sweep arms now call `mem.candidates(n)`
+instead of `mem.entries()` too, via a `candidates_fn` hook added to
+`packer()` (default `None`, so every other arm's measured numbers are
+unaffected). This matters beyond the small pool sizes: even the pool=200
+row will very likely change on the next run, not just 50/100, because the
+candidate list's ORDER changed (importance-sorted instead of chronological)
+even though the SET is identical at 200 on a ~170-knot store. That is
+expected, not a regression -- the whole point was to stop measuring
+something production no longer does.
+
+7 new tests (`TestCandidates`, `TestWideBridgeCandidateSelection` in
+`test_qontext_memory.py`, 127 total, all passing): importance ordering
+regardless of insertion order, recency tiebreak among equal importance,
+limit both in count and in *which* knots survive (a high-importance fact
+planted mid-stream among uniform filler must survive a small limit), and
+confirmation that `bridge`'s path is unaffected while `wide_bridge`'s is.
+
+**Not yet measured against the benchmark.** The next `bridge_bench.py`
+run with `--llm-judge-candidates` is the actual test of whether this
+recovers pool 50/100's accuracy without needing the full store visible --
+built on a real, precedented signal rather than either blind direction, but
+"principled" and "measured to work" are not the same claim, and this
+project does not treat them as one until it's checked.
+
+## Measured: real recovery, not full recovery, and a clean explanation why
+
+| pool | A real / control | B real / control | B per kind |
+|---|---|---|---|
+| 50  | 60%, 11.6x | 42%, 16.0x | hypernym 9/12, reference 9/12, script 3/12, consequence 3/12, inference 0/9 |
+| 100 | 67%, 10.4x | **42%**, 13.7x | identical to pool 50 on every single kind |
+| 200 | 79%, 8.6x  | 65%, 13.1x | hypernym 11/12, reference 12/12, script 6/12, consequence 6/12, inference 2/9 |
+
+Against the previous (recency-only) fix, this is a real improvement, not
+noise: B went from 21%/21% (zero added value, identical to baseline) to
+42%/42%. Against the *original bug*'s numbers (84%/74%, before either fix),
+it is still a real loss -- but that comparison was always going to be
+unfair to any principled fix, since the bug's apparent strength was an
+accident of this benchmark planting its answers early, not a property
+worth preserving.
+
+**Pool 50 and pool 100 scored identically on every gap kind -- not
+approximately, exactly.** That is informative, not a coincidence. Sorting
+by `(imp desc, seq desc)` front-loads every knot that scores above the
+default importance tier; if the ~170-knot store has on the order of 50
+such knots, the first 50 slots already contain all of them, and the next
+50 (pool 100's extra room) are additional default-importance filler that
+cannot help because nothing in it outranks what is already excluded.
+Growing the pool further only helps once it reaches far enough to include
+knots that are IMPORTANT to the query but were never scored as important by
+`_importance()` -- which is a static, content/vocabulary heuristic, not
+aware of what a later query will actually ask. Pool 200 still wins because
+it is not really "a larger curated set" on a 170-knot store, it is
+"everything" -- the same ceiling as before any of this started.
+
+**What this establishes:** `_importance()` is a real, useful, but partial
+proxy for "will a bridge need to see this." It recovered exactly the gap a
+pure recency slice could not (identity/standing facts, hence hypernym going
+0/12->9/12 even at pool 50) without needing the whole store, and gained
+nothing further from doubling the pool, which is the signature of a
+selection that is already using its best signal and hitting that signal's
+ceiling, not one that just needs a bigger number.
+
+**Practical verdict, at the scale this project currently measures:** the
+suites here are ~170 knots, comfortably under the 200 default -- so nothing
+changes for `qontext.qx` at its current typical size; pool=200 (in effect,
+uncapped) is already what runs. The value of this round is a real,
+measured, better-than-either-blind-alternative fallback for when a session
+eventually does outgrow the cap, not a way to shrink the pool below full
+visibility today without a recall cost that is smaller than it was, but
+still real. Three separate levers were tried for the original latency
+question -- a smaller model, a blind pool shrink, an importance-aware pool
+shrink -- and all three converge on the same practical answer: at this
+project's current scale, the cheap, zero-risk win (`cache_prompt`, shipped
+earlier) is the win, and further latency reduction has a real accuracy
+cost every time it has actually been measured rather than assumed.

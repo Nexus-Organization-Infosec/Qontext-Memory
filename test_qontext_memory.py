@@ -837,6 +837,108 @@ class TestStats(unittest.TestCase):
         self.assertIn("stored_chars", st)
 
 
+class TestCandidates(unittest.TestCase):
+    """candidates(): the importance+recency selection wide_bridge is shown
+    instead of entries()'s raw insertion order, once a session has more
+    knots than it can afford to list in full. See RP_FINDINGS.md, the
+    candidate-pool sweep entries, for why this exists -- a prefix slice of
+    entries() hides everything new forever, a suffix slice hides everything
+    old-but-important, and this was built to do neither."""
+
+    def test_defaults_to_everything(self):
+        mem = QontextMemory()
+        for text in ("The gym was busy on day 0.", "People call me Marta."):
+            mem.observe("user", text)
+        self.assertEqual(len(mem.candidates()), len(mem.entries()))
+
+    def test_empty_memory_is_empty_list(self):
+        self.assertEqual(QontextMemory().candidates(), [])
+
+    def test_high_importance_outranks_low_regardless_of_order(self):
+        mem = QontextMemory()
+        # low importance ("gym" -> WEIGHT_2, imp 2.0), stored FIRST
+        mem.observe("user", "The gym was busy on day 0.")
+        # high importance ("call"/"named" -> WEIGHT_5, imp 5.0), SECOND
+        mem.observe("user", "People call me Marta.")
+        ranked = mem.candidates()
+        self.assertIn("Marta", ranked[0])
+
+    def test_equal_importance_breaks_tie_by_recency(self):
+        mem = QontextMemory()
+        # both hit the same WEIGHT_2 ("gym") tier -- imp tied at 2.0 --
+        # so the more recent one must rank first, not the first-observed.
+        mem.observe("user", "The gym was busy on day 0.")
+        mem.observe("user", "The gym was busy on day 1.")
+        ranked = mem.candidates()
+        self.assertIn("day 1", ranked[0])
+
+    def test_limit_caps_count(self):
+        mem = QontextMemory()
+        for i in range(20):
+            mem.observe("user", "The gym was busy on day %d." % i)
+        self.assertEqual(len(mem.candidates(5)), 5)
+        self.assertEqual(len(mem.candidates(0)), 0)
+
+    def test_limit_keeps_highest_ranked_not_arbitrary(self):
+        mem = QontextMemory()
+        for i in range(20):
+            mem.observe("user", "The gym was busy on day %d." % i)
+        # one high-importance fact planted in the MIDDLE of otherwise
+        # uniform-importance filler -- a limit small enough to drop most
+        # of the filler must still keep this one.
+        mem.observe("user", "People call me Marta.")
+        for i in range(20, 40):
+            mem.observe("user", "The gym was busy on day %d." % i)
+        self.assertTrue(any("Marta" in c for c in mem.candidates(3)))
+
+
+class TestWideBridgeCandidateSelection(unittest.TestCase):
+    """pack()'s wide_bridge call must use candidates(), not raw entries()
+    order -- and the cheap `bridge` path must be completely unaffected,
+    since embeddings/weave's already-measured numbers depend on it seeing
+    every knot in its original order."""
+
+    def test_wide_bridge_sees_importance_ordered_candidates(self):
+        seen = {}
+
+        def judge(query, knots, k):
+            seen["knots"] = knots
+            return []
+        mem = QontextMemory(bridge=None, bridge_classifier=lambda q: True,
+                            wide_bridge=judge)
+        mem.observe("user", "The gym was busy on day 0.")
+        mem.observe("user", "People call me Marta.")
+        mem.pack("anything", 300)
+        self.assertIn("Marta", seen["knots"][0])
+
+    def test_cheap_bridge_still_sees_raw_insertion_order(self):
+        seen = {}
+
+        def cheap(query, knots, k):
+            seen["knots"] = knots
+            return []
+        mem = QontextMemory(bridge=cheap, bridge_k=3)
+        mem.observe("user", "The gym was busy on day 0.")
+        mem.observe("user", "People call me Marta.")
+        mem.pack("anything", 300)
+        # insertion order, NOT importance order -- this path is untouched
+        self.assertIn("gym", seen["knots"][0])
+        self.assertIn("Marta", seen["knots"][1])
+
+    def test_wide_candidate_limit_bounds_what_the_judge_sees(self):
+        seen = {}
+
+        def judge(query, knots, k):
+            seen["n"] = len(knots)
+            return []
+        mem = QontextMemory(bridge=None, bridge_classifier=lambda q: True,
+                            wide_bridge=judge, wide_candidate_limit=2)
+        for i in range(10):
+            mem.observe("user", "The gym was busy on day %d." % i)
+        mem.pack("anything", 300)
+        self.assertEqual(seen["n"], 2)
+
+
 class TestDunders(unittest.TestCase):
     def setUp(self):
         self.mem = QontextMemory()

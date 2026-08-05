@@ -45,6 +45,7 @@ tokens per query for nothing gained on a judge task this narrow.
 """
 
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -79,6 +80,12 @@ def make_llm_judge(api_url=DEFAULT_API_URL, max_candidates=200, timeout=90):
                        problem on the server, see the message text)
       .truncated      True if a candidate pool ever exceeded max_candidates
                        and was cut, silently, without this flag
+      .seconds        wall-clock time spent inside real network calls (not
+                       cached replays) -- the actual thing "smaller model /
+                       fewer candidates" is supposed to move. A model swap
+                       measured only on accuracy and never on this is an
+                       instrument given no chance to prove the thing it was
+                       tried for.
     """
     cache = {}
 
@@ -87,6 +94,7 @@ def make_llm_judge(api_url=DEFAULT_API_URL, max_candidates=200, timeout=90):
         if key in cache:
             return cache[key]
         propose.network_calls += 1
+        started = time.perf_counter()
         listing = "\n".join("%d. %s" % (i + 1, c)
                             for i, c in enumerate(candidates))
         prompt = (
@@ -107,8 +115,24 @@ def make_llm_judge(api_url=DEFAULT_API_URL, max_candidates=200, timeout=90):
                                               "nothing else."},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.0, "top_p": 1.0, "max_tokens": 64,
+            "temperature": 0.0, "top_p": 1.0, "max_tokens": 32,
             "chat_template_kwargs": {"enable_thinking": False},
+            # The candidate list, not the answer, is the expensive part of
+            # this call -- generation is a handful of numbers, but the
+            # prompt re-lists every candidate fact, every time. Below
+            # max_candidates total knots, the FACTS block is a stable,
+            # growing PREFIX across consecutive calls (new facts only ever
+            # append). Above the cap, the visible window slides with each
+            # new knot instead of staying frozen -- see the recency slice
+            # in propose() -- so the shared-prefix property only holds
+            # between calls with no new knot learned in between, not
+            # indefinitely; still the common case, since most turns don't
+            # produce a new knot at all. cache_prompt lets the server reuse
+            # the KV cache for whatever prefix IS shared instead of
+            # reprocessing it from zero every time -- same output
+            # (temperature 0, this changes nothing about what's asked or
+            # answered), only how much of it has to be recomputed.
+            "cache_prompt": True,
         }).encode()
         request = urllib.request.Request(
             api_url, data=body, headers={"Content-Type": "application/json"})
@@ -117,9 +141,11 @@ def make_llm_judge(api_url=DEFAULT_API_URL, max_candidates=200, timeout=90):
                 data = json.loads(resp.read())
         except (urllib.error.HTTPError, urllib.error.URLError,
                 OSError) as error:
+            propose.seconds += time.perf_counter() - started
             cache[key] = ("error", type(error).__name__)
             propose.errors.append(cache[key][1])
             return cache[key]
+        propose.seconds += time.perf_counter() - started
         message = data["choices"][0]["message"]
         text = (message.get("content") or "").strip()
         if not text:
@@ -132,7 +158,17 @@ def make_llm_judge(api_url=DEFAULT_API_URL, max_candidates=200, timeout=90):
         return cache[key]
 
     def propose(query, knots, topk):
-        pool = tuple(knots)[:max_candidates]
+        # The most RECENT max_candidates knots, not the first -- `knots` is
+        # append-ordered (qontext_memory.py's `self._knots` is a plain
+        # append-only list), so a prefix slice would freeze the visible
+        # window at whatever was learned first and never see anything added
+        # after it, silently, for the life of the memory once it grows past
+        # max_candidates. Found via bridge_bench's pool-size sweep: this
+        # benchmark's synthetic conversations happen to plant target facts
+        # early, so a prefix slice looked fine here and would have shipped
+        # wrong regardless.
+        all_knots = tuple(knots)
+        pool = all_knots[-max_candidates:] if max_candidates > 0 else ()
         propose.truncated = propose.truncated or len(knots) > max_candidates
         status, payload = ask(query, pool)
         propose.calls += 1
@@ -157,4 +193,5 @@ def make_llm_judge(api_url=DEFAULT_API_URL, max_candidates=200, timeout=90):
     propose.calls = 0
     propose.network_calls = 0
     propose.truncated = False
+    propose.seconds = 0.0
     return propose
