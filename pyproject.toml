@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qontext-memory"
+version = "1.0.0"
+description = "A quipu-inspired conversational memory for language models: keep a fixed-size summary of a conversation instead of resending the whole transcript."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Hylke Siegersma" },
+]
+keywords = [
+    "llm", "memory", "context", "rag", "retrieval",
+    "conversational-ai", "chatbot", "roleplay",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+]
+# Every module below is standard library only -- see README, "Pure Python,
+# one file, no dependencies". No install_requires by design.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Nexus-Organization-Infosec/Qontext-Memory"
+Repository = "https://github.com/Nexus-Organization-Infosec/Qontext-Memory"
+Issues = "https://github.com/Nexus-Organization-Infosec/Qontext-Memory/issues"
+
+[tool.setuptools]
+py-modules = [
+    "qontext_memory",
+    "qontext_cords",
+    "qontext_rp",
+    "qontext_weave",
+    "seed_weave",
+    "llm_judge_bridge",
+]

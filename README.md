@@ -8,6 +8,10 @@ everything said, but a compact encoding of what was worth keeping. Qontext
 stores a conversation the same way: short, self-contained facts ("knots"), and
 `pack(query, budget)` returns only the ones a given question needs.
 
+```
+pip install qontext-memory
+```
+
 ```python
 from qontext_memory import QontextMemory
 
