@@ -61,6 +61,10 @@
   footer { margin-top: 46px; color: var(--muted); font-size: 0.82rem; border-top: 1px solid var(--border); padding-top: 16px; }
   footer a { color: var(--accent); }
   .hint { color: var(--muted); font-size: 0.82rem; margin-top: 4px; }
+  .caveat {
+    margin-top: 8px; font-size: 0.82rem; color: #fbbf24; background: #241a05;
+    border: 1px solid #4a3a10; border-radius: 6px; padding: 8px 10px;
+  }
 </style>
 </head>
 <body>
@@ -101,6 +105,7 @@
     <div>
       <label>What Qontext sends</label>
       <div class="pack-box" id="packOut">—</div>
+      <div class="caveat" id="caveatOut" hidden></div>
       <div class="stats" id="statsOut"></div>
       <details>
         <summary>Every knot in memory</summary>
@@ -235,9 +240,29 @@ function run() {
     const memory = new QontextMemory();
     for (const [who, said] of conversation) memory.observe(who, said);
 
-    const packed = memory.pack(document.getElementById('query').value || '', parseInt(budget.value, 10));
+    const queryText = document.getElementById('query').value || '';
+    const packed = memory.pack(queryText, parseInt(budget.value, 10));
     const stats = memory.stats();
     const entries = memory.entries();
+
+    // pack() has a documented safety net: if literally no stored knot shares
+    // a word with the query, it sends the newest knot rather than nothing,
+    // "so the model still has some grounding" -- see qontext_memory.py's
+    // pack() docstring. That is a real, deliberate design choice, but shown
+    // with no caveat it looks like a relevant answer rather than a shrug.
+    // This block only affects the demo's display, not retrieval itself.
+    const ranked = memory._ranked(queryText);
+    const noLexicalMatch = packed && ranked.length === 0 && memory.size > 0;
+
+    const caveatEl = document.getElementById('caveatOut');
+    if (noLexicalMatch) {
+        caveatEl.hidden = false;
+        caveatEl.textContent = 'No stored knot shares a word with this question. '
+            + 'This is the most recently added fact, sent as a fallback so the '
+            + 'model has some grounding — not a real match.';
+    } else {
+        caveatEl.hidden = true;
+    }
 
     document.getElementById('packOut').textContent = packed || '(nothing matched — try another question)';
     document.getElementById('statsOut').innerHTML =
