@@ -74,10 +74,12 @@ export function extract(text, subject = 'the user', dropAddress = true) {
 }
 
 export class QontextMemory {
-    constructor({ maxEntries = 500, speakers = 'user' } = {}) {
+    constructor({ maxEntries = 500, speakers = 'all' } = {}) {
         this.maxEntries = maxEntries;
-        // "user": only the user states facts (assistant chatter is noise).
-        // "all": every speaker is their own subject.
+        // "all" (default): every speaker is their own subject -- the
+        // assistant's own statements are kept too, not just the user's.
+        // "user": only the user states facts; everything else is chatter
+        // with no facts of its own.
         this.speakers = speakers;
         this.knots = [];
         this.seen = new Set();

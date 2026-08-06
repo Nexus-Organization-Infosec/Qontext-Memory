@@ -38,6 +38,25 @@ against a 12B model, three seeds:**
 Three seeds cannot separate 9.3 from 9.7 — that is a tie. **The 119x reduction
 is the result**: the same answers for one percent of the prompt.
 
+**Re-verified under `speakers="all"`** (the current default; the table above
+was originally measured under `speakers="user"`, the previous default). Same
+command, same three seeds, same 800-turn conversation:
+
+| | full transcript | Qontext pack |
+|---|---|---|
+| accuracy | 10.0 / 10 | 9.7 / 10 |
+| prompt tokens per call | 13,853 | **117** |
+| prompt processing | 5.8 s | 0.7 s |
+
+The pack side — the one `speakers=` actually changes — held almost exactly:
+same 9.7 accuracy, same single miss (still the assistant's name question,
+still answered "Terry Graham"), 117 tokens against a previously-measured
+116. The full-transcript side improved from 9.3 to 10.0, but that arm never
+touches `QontextMemory` at all, so this isn't something the default change
+gets credit for — most likely run-to-run model variance (sampling is not
+deterministic at temperature 0.2), not re-investigated further. **The 119x
+figure and the tied-accuracy claim both stand under the current default.**
+
 On smaller models the picture is stronger and more conditional. A 9B scores
 4.3/10 from a transcript full of plausible wrong answers against the pack's
 8.0; a 4B scores 4/10 against 10/10. The honest statement is that *context

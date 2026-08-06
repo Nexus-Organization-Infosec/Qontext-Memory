@@ -357,6 +357,52 @@ produced obviously wrong ones.
 - **The paper's ten references** have never been verified.
 - `affordance_turnbench.json` needs the local llama server to regenerate
   (`--reasoning-budget 0`, chat endpoint).
+- **`QontextMemory`'s default changed: `speakers="user"` → `speakers="all"`.**
+  Found via a live-demo bug report: "who sounds like a handful?" (answering
+  "Bikkel sounds like a handful!", said by the *assistant*) returned an
+  unrelated knot, because `speakers="user"` discarded the assistant's line
+  entirely — no fact existed for the query to reach, so `pack()`'s
+  documented no-match fallback (send the newest knot) fired instead. The
+  user's call: switch the default globally, on the explicit basis that
+  "knot count does not trump actually being able to answer accurately."
+  Mechanically small (one line + docstrings, in both `qontext_memory.py` and
+  the JS port `qontext_chat.js`) but **not a free change**:
+  - One real test broke: `TestRealConversation`'s density guarantee (was
+    "< 0.5", now measured 0.50 on that fixture once the assistant's own
+    lines are stored too). Split into two tests rather than loosened blind:
+    `test_density_under_half_when_only_the_user_states_facts` (pins the old
+    guarantee explicitly with `speakers="user"`) and
+    `test_density_under_two_thirds_with_all_speakers` (the new default,
+    real margin above the measured 0.50). 128 tests pass (115 in
+    `test_qontext_memory.py` + 13 in `test_llm_judge_bridge.py`).
+  - `extension/qontext/qontext_chat.js`'s default flipped to match;
+    `parity_chat.mjs` regenerated and still 50/50, `parity.mjs` (RP) still
+    24/24 — RPMemory is unaffected, roleplay already gives every speaker
+    their own subject by construction.
+  - **The headline README table (119x, 9.3 vs 9.7 accuracy) was measured
+    with the OLD default** — `bench/long_bench.py` and
+    `bench/turn_bench.py` (behind every number in `RP_FINDINGS.md`) both
+    construct `QontextMemory()` bare, no `speakers=` argument. Most of the
+    *diagnostic* scripts (`bridge_ceiling.py`, `size_scaling.py`,
+    `turn_ceiling.py`, `rp_turnbench.py`, etc.) already passed
+    `speakers="all"` explicitly, so those findings are unaffected — it is
+    specifically the two flagship benchmarks that were affected.
+    **`long_bench.py` re-run by the user** on the exact original command
+    (`--turns 800 --filler daily-clean --seeds 7,11,23`, from
+    `qontext-bench/LIVE_RUN_FINDINGS.md`, "The headline result"). The pack
+    side — the only side `speakers=` touches — held almost exactly: 9.7
+    accuracy (was 9.7), 117 tokens (was 116), same single miss on the same
+    seed, same wrong answer ("Terry Graham"). The full-transcript side rose
+    9.3 → 10.0, but that arm never calls `QontextMemory` at all, so this
+    isn't attributable to the default change — logged as unexplained
+    run-to-run variance (temp 0.2, not deterministic), not investigated
+    further. **README.md's headline table is re-verified under the current
+    default** — 119x and the tied-accuracy claim both stand.
+    `turn_bench.py` (behind `RP_FINDINGS.md`) has not been re-run; it needs
+    the same treatment if those numbers are cited again.
+  - The demo's earlier no-match caveat banner (added the same round, before
+    this) stays — it is a real, separate safety net for genuine no-match
+    queries and does not overlap with this fix.
 
 ## Facts about the environment
 

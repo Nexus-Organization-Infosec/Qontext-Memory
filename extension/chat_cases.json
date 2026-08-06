@@ -104,37 +104,53 @@
    [
     "the user works as a nurse, mostly night shifts, so the user replys at odd hours"
    ],
-   [],
+   [
+    "Good to know, no rush on replies then"
+   ],
    [],
    [],
    [
     "Lately the user codes in Rust for fun"
    ],
-   [],
+   [
+    "Rust is a great choice for CLI tools"
+   ],
    [
     "the sprint demo is on Friday at 10:00"
    ],
-   [],
+   [
+    "Noted, sprint demo Friday at 10:00"
+   ],
    [
     "the team's project is codenamed heron-nest, silly name"
    ],
-   [],
+   [
+    "heron-nest, got it"
+   ],
    [
     "the user's dog is called Bikkel"
    ],
-   [],
+   [
+    "Bikkel sounds like a handful"
+   ],
    [
     "please keep explanations brief"
    ],
-   [],
+   [
+    "Will do, brief it is"
+   ],
    [
     "the report is due March 3rd, hard deadline"
    ],
-   [],
+   [
+    "March 3rd, noted as a hard deadline"
+   ],
    [
     "the team tracks tasks in Trello"
    ],
-   []
+   [
+    "Understood, Trello board it is"
+   ]
   ],
   "packs": [
    [
@@ -145,7 +161,7 @@
    [
     "what is the dog called?",
     300,
-    "the user's dog is called Bikkel"
+    "the user's dog is called Bikkel\npeople call the user Marta"
    ],
    [
     "tell me about work",
@@ -160,27 +176,34 @@
    [
     "what does the user prefer?",
     200,
-    "the team tracks tasks in Trello"
+    "Understood, Trello board it is"
    ]
   ],
   "entries": [
    "people call the user Marta",
    "the user is based in Utrecht",
    "the user works as a nurse, mostly night shifts, so the user replys at odd hours",
+   "Good to know, no rush on replies then",
    "Lately the user codes in Rust for fun",
-   "the sprint demo is on Friday at 10:00",
+   "Rust is a great choice for CLI tools",
+   "Noted, sprint demo Friday at 10:00",
    "the team's project is codenamed heron-nest, silly name",
+   "heron-nest, got it",
    "the user's dog is called Bikkel",
+   "Bikkel sounds like a handful",
    "please keep explanations brief",
+   "Will do, brief it is",
    "the report is due March 3rd, hard deadline",
-   "the team tracks tasks in Trello"
+   "March 3rd, noted as a hard deadline",
+   "the team tracks tasks in Trello",
+   "Understood, Trello board it is"
   ],
   "stats": {
-   "mean_importance": 3.7,
+   "mean_importance": 3.075132874836705,
    "observed_chars": 1077,
-   "stored_chars": 395,
-   "entries": 10,
-   "density": 0.36675951717734445,
+   "stored_chars": 596,
+   "entries": 17,
+   "density": 0.5533890436397401,
    "max_entries": 500
   }
  },

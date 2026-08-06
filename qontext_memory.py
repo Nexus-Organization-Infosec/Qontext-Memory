@@ -1156,15 +1156,21 @@ class QontextMemory:
         evicted (oldest first among the least used), so a long-running agent
         cannot grow without bound.
     speakers:
-        "user" (default) stores facts only from the user. "all" treats every
-        speaker as their own subject, so "I drew my sword" from Carmine
-        becomes "Carmine drew her sword" — needed for roleplay and group
-        chats, where the other party is a character with facts of their own.
+        "all" (default) treats every speaker as their own subject, so
+        "I drew my sword" from Carmine becomes "Carmine drew her sword" —
+        every party's own statements are kept, including an assistant's or
+        another character's. "user" restricts extraction to the user only,
+        treating everything the other party says as chatter with no facts
+        of its own; use this where the other party has no standing worth
+        remembering (e.g. a tool-only integration) or where the extra knots
+        "all" admits from the other party cost more budget than they earn
+        back in recall for your workload — measure before switching, the
+        two modes are not interchangeable defaults for every use case.
     """
 
     FORMAT_VERSION = 2
 
-    def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="user",
+    def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="all",
                  weave=None, bridge=None, bridge_k=BRIDGE_K,
                  bridge_classifier=None, bridge_k_wide=BRIDGE_K_WIDE,
                  bridge_budget_multiplier=BRIDGE_BUDGET_MULTIPLIER,
@@ -1175,9 +1181,10 @@ class QontextMemory:
         if speakers not in ("user", "all"):
             raise ValueError("speakers must be 'user' or 'all'")
         self.max_entries = max_entries
-        # "user": only the user states facts (assistant chatter is noise).
         # "all": every speaker is their own subject — roleplay, group chats,
-        # anywhere the other party is a character with facts of their own.
+        # assistant chat where the assistant's own statements are worth
+        # keeping too. "user": only the user states facts, everything else
+        # is chatter with no facts of its own.
         self.speakers = speakers
         # Optional WordWeave (qontext_weave.py): a persistent map of which
         # words hang together, used to reach knots the query has no word for.
