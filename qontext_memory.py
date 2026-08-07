@@ -85,11 +85,6 @@ SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
 # Hidden index terms: words from the turn a knot came from, used for matching
 # and never shown to the model.
 #
-# Measured on real logs: of the facts a reply needed and retrieval could not
-# reach, 44.5% had a bridging word in the very turn that produced the knot.
-# Extraction discarded it. Three semantic bridges rescue ~7% of the same
-# population, so this is a six-fold larger opportunity.
-#
 # It does not trade against design rules 2 and 3, because index terms are not
 # display text: the pack stays short while the knot becomes reachable through
 # words nobody has to read. Storage grows, the prompt does not.
@@ -101,8 +96,27 @@ SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
 # use one representation for both jobs, which is what created the tension with
 # design rules 2 and 3 here.
 #
-# 0 disables the mechanism entirely.
-INDEX_TERMS = 10            # hidden terms kept per knot
+# RETRACTION. This used to default to 10, on the strength of two numbers:
+# a 44.5% write-time-bridging oracle, and a "+0.8pts, 5-0 per-log" correction
+# after a document-frequency ceiling was added. Both were measured on
+# rp_turnbench.py, which RP_FINDINGS.md and HANDOFF.md later withdrew in full
+# ("Withdrawn: ... 44.5% write-time bridging, index terms, ...") after it
+# failed a shuffle control -- it inferred ground truth from each
+# conversation's own continuation, and a reply from an unrelated conversation
+# satisfied 97% as many "needed" facts as the real one did. The mechanism was
+# re-run exactly once on turn_bench.py, the benchmark that replaced it and
+# does pass that control (RP_FINDINGS.md, "The bridges, re-run — and a
+# reversal"): "write-time index terms" scored identical to plain lexical
+# baseline, 6.0/18 real and 6/42 turn-shaped either way. No measured benefit
+# survived the switch to a trustworthy instrument.
+#
+# The applicable rule is stated a few hundred lines down, for COVERAGE_GATE,
+# and applies here with equal force: "a feature with no evidence should not
+# be on." Default is therefore 0, off. The mechanism is kept, tested, and
+# free when disabled, exactly like COVERAGE_GATE -- known harmless, no longer
+# known to be useful, available if a future benchmark finds a workload where
+# reachability (as opposed to ranking) is the binding constraint.
+INDEX_TERMS = 0              # hidden terms kept per knot; 0 disables it
 INDEX_WEIGHT = 0.35         # their score relative to a word in the knot itself
 INDEX_DF_CEILING = 0.02     # skip words already in this share of knots
 
@@ -1168,7 +1182,7 @@ class QontextMemory:
         two modes are not interchangeable defaults for every use case.
     """
 
-    FORMAT_VERSION = 2
+    FORMAT_VERSION = 3
 
     def __init__(self, max_entries=DEFAULT_MAX_ENTRIES, speakers="all",
                  weave=None, bridge=None, bridge_k=BRIDGE_K,
@@ -1427,12 +1441,6 @@ class QontextMemory:
         overflow = len(self._knots) - self.max_entries
         if overflow <= 0:
             return
-        # Importance multiplies distinctiveness rather than outranking it.
-        # Ordering by importance first was measured and was worse: chatter
-        # that happens to say "meeting" inherits a commitment's weight and
-        # survives, while "the user's editor is Neovim" — distinctive, but a
-        # mere tool — gets evicted. Rarity is what tells a fact from filler;
-        # importance says how much that fact is worth.
         # Importance nudges distinctiveness rather than outranking it. Two
         # stronger versions were measured and both were worse: ordering by
         # importance first, and multiplying by the raw 1-5 weight, each let
@@ -1862,7 +1870,8 @@ class QontextMemory:
                 "max": self.max_entries,
                 "o": self._observed,
                 "seq": self._seq,
-                "k": [[k["text"], k["seq"], k["hits"], round(k["ts"], 3)]
+                "k": [[k["text"], k["seq"], k["hits"], round(k["ts"], 3),
+                       sorted(k.get("idx") or ()), k.get("reinforced", 0)]
                       for k in self._knots],
             }, ensure_ascii=False).encode("utf-8")
 
@@ -1870,10 +1879,19 @@ class QontextMemory:
     def deserialize(cls, data):
         """Rebuild from serialize() output.
 
-        Accepts the v1 format ({"e": [...], "o": n}) as well, so memories
+        Accepts the v1 format ({"e": [...], "o": n}) and the v2 row format
+        (five elements shorter, no idx/reinforced) as well, so memories
         written by earlier versions keep working. Raises ValueError on data
         that is not a Qontext memory at all — use load() if you would rather
         get an empty memory than an exception.
+
+        Before FORMAT_VERSION 3, a knot's hidden index terms (see
+        INDEX_TERMS) and its `reinforced` count were computed at write time
+        but never serialized, so they silently reset to empty/0 on every
+        save/load cycle -- inert while INDEX_TERMS defaults to 0, but a real
+        loss for anyone who opts it back on for a long-running, persisted
+        memory. v3 rows carry both; older rows still load, just without
+        them, exactly as before.
         """
         if isinstance(data, (bytes, bytearray)):
             data = bytes(data).decode("utf-8", "replace")
@@ -1889,23 +1907,30 @@ class QontextMemory:
                   else DEFAULT_MAX_ENTRIES)
         mem._observed = d.get("o", 0) if isinstance(d.get("o"), int) else 0
 
-        if "k" in d:                                    # v2
+        if "k" in d:                                    # v2 or v3
             for row in d.get("k") or []:
                 if isinstance(row, str):
                     row = [row]
                 elif not isinstance(row, (list, tuple)):
                     continue
-                text, seq, hits, ts = (list(row) + ["", 0, 0, 0.0])[:4]
+                text, seq, hits, ts, idx, reinforced = (
+                    list(row) + ["", 0, 0, 0.0, [], 0])[:6]
                 text = _coerce(text).strip()
                 if not text or text in mem._seen:
                     continue
                 text = text[:MAX_ENTRY_CHARS]
                 knot_frame = _frame(text)
+                reinforced = int(reinforced or 0)
+                hits = int(hits or 0)
+                idx_set = (frozenset(t for t in idx if isinstance(t, str))
+                           if isinstance(idx, (list, tuple)) else frozenset())
                 record = {"text": text, "seq": int(seq or 0),
-                          "hits": int(hits or 0), "ts": float(ts or 0.0),
+                          "hits": hits, "ts": float(ts or 0.0),
                           "w": frozenset(_words(text)), "f": knot_frame,
-                          "ids": _identifiers(knot_frame), "reinforced": 0,
-                          "imp": _importance(text, 0, int(hits or 0))}
+                          "ids": _identifiers(knot_frame),
+                          "reinforced": reinforced,
+                          "imp": _importance(text, reinforced, hits),
+                          "idx": idx_set}
                 mem._knots.append(record)
                 mem._seen.add(text)
                 mem._index_add(record)
@@ -1919,7 +1944,8 @@ class QontextMemory:
                     record = {"text": text, "seq": mem._seq, "hits": 0,
                               "ts": 0.0, "w": frozenset(_words(text)),
                               "f": knot_frame, "ids": _identifiers(knot_frame),
-                              "reinforced": 0, "imp": _importance(text)}
+                              "reinforced": 0, "imp": _importance(text),
+                              "idx": frozenset()}
                     mem._knots.append(record)
                     mem._seen.add(text)
                     mem._index_add(record)

@@ -404,6 +404,50 @@ produced obviously wrong ones.
     this) stays — it is a real, separate safety net for genuine no-match
     queries and does not overlap with this fix.
 
+- **Ultragoal review pass on `qontext_memory.py`** (`.claude/ultragoal-progress.md`
+  has the full log). Full read of all ~2054 lines against `RP_FINDINGS.md`
+  and this file's own retraction history. Three rounds, all kept:
+  1. `INDEX_TERMS` default `10` → `0`. Its enabling comment cited the
+     44.5% write-time-bridging figure and a "+0.8pts, 5-0 per-log"
+     correction as live justification — both measured on
+     `rp_turnbench.py`, which this file already lists as withdrawn after
+     failing a shuffle control. The one re-measurement on the *valid*
+     benchmark (`turn_bench.py`, "The bridges, re-run — and a reversal")
+     showed no effect over plain baseline. `COVERAGE_GATE`'s own comment
+     states the rule this violated: "a feature with no evidence should
+     not be on." Rewrote the comment to say so plainly instead of citing
+     retracted numbers. 128/128 tests unaffected (nothing referenced it).
+  2. Real persistence bug: `serialize()`/`deserialize()` silently dropped
+     a knot's hidden index terms and its `reinforced` count on every
+     save/load cycle — both computed at write time, neither ever
+     serialized. Inert while `INDEX_TERMS` defaults to 0, but
+     `reinforced` feeds `_importance()` on every supersession and is live
+     by default, so any persisted memory with a corrected fact was
+     losing that fact's reinforcement weight on reload. `FORMAT_VERSION`
+     2 → 3; v3 rows carry both, v1/v2 rows still load with the old
+     defaults. Three new round-trip tests added; 131/131 total.
+  3. Removed a duplicated comment block above `_evict()` — two
+     back-to-back paragraphs saying the same thing about importance vs.
+     distinctiveness, left over from a rewrite that never deleted the
+     original.
+  Stopped at 3, not 10: the next real candidate (`pack()`'s no-lexical-
+  match fallback picks literal-newest, `max(..., key=seq)`, while every
+  other selection policy in this file — `PACK_RESERVE`, `candidates()`,
+  `_evict()` — was measured and rewritten to blend importance with
+  recency because "just newest" alone lost) needs `long_bench.py` /
+  `turn_bench.py` against the local model server to verify honestly, and
+  this sandbox has no model server reachable (see below). Left open for
+  whoever has that access, rather than shipping an unmeasured change to
+  core retrieval — this file's own retraction history is the reason not
+  to.
+  - **Not yet synced to `qontext-live/qontext_memory.py`** — that copy
+    still has the pre-Round-1 `INDEX_TERMS=10` comment and lacks all
+    three rounds' changes. The two files have been drifting for at least
+    one prior round (the `speakers="all"` default change above also
+    isn't in `qontext-live`). Worth deciding whether `qontext-live` is a
+    deliberate frozen snapshot or should track `qontext-memory/` — as-is,
+    nothing keeps them in sync automatically.
+
 ## Facts about the environment
 
 - Logs `log8.txt` / `log12.txt` are excluded in code after a content screen.

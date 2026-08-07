@@ -817,6 +817,55 @@ class TestPersistence(unittest.TestCase):
     def test_serialize_returns_bytes(self):
         self.assertIsInstance(self.mem.serialize(), bytes)
 
+    def test_reinforced_survives_round_trip(self):
+        """A supersession's inherited `reinforced` count fed the knot's
+        importance score even before this fix -- but only for the life of
+        the process. Before FORMAT_VERSION 3 it silently reset to 0 on
+        every save/load, quietly flattening long-lived knots' importance
+        each time a persisted memory was reloaded."""
+        mem = QontextMemory()
+        mem.observe("user", "My manager is Priya.")
+        mem.observe("user", "My manager is Tomas now.")
+        before = next(k for k in mem._knots if "tomas" in k["text"].lower())
+        self.assertGreater(before["reinforced"], 0)
+        again = QontextMemory.deserialize(mem.serialize())
+        after = next(k for k in again._knots if "tomas" in k["text"].lower())
+        self.assertEqual(after["reinforced"], before["reinforced"])
+
+    def test_idx_survives_round_trip_when_enabled(self):
+        """Hidden index terms (INDEX_TERMS) are opt-in and off by default
+        (see the constant's comment), but a caller who opts back in for a
+        long-running, persisted memory needs them to survive a reload --
+        before FORMAT_VERSION 3 they were computed at write time and then
+        silently discarded on every save/load."""
+        import qontext_memory as qm
+        previous = qm.INDEX_TERMS
+        try:
+            qm.INDEX_TERMS = 10
+            mem = QontextMemory()
+            mem.observe("user", "Bikkel sounds like a handful, my dog "
+                                 "chewed the sofa again yesterday.")
+            before = mem._knots[0]
+            self.assertTrue(before["idx"])
+            again = QontextMemory.deserialize(mem.serialize())
+            after = again._knots[0]
+            self.assertEqual(after["idx"], before["idx"])
+        finally:
+            qm.INDEX_TERMS = previous
+
+    def test_reads_v2_format_without_idx_or_reinforced(self):
+        """v2 rows (four elements, no idx/reinforced) must still load --
+        they just come back with the empty/zero defaults, same as before
+        this fix, rather than raising or crashing."""
+        v2 = json.dumps({"v": 2, "o": 5, "k": [
+            ["the user works as a nurse", 1, 0, 0.0],
+        ]}).encode()
+        mem = QontextMemory.deserialize(v2)
+        self.assertEqual(len(mem), 1)
+        knot = mem._knots[0]
+        self.assertEqual(knot["idx"], frozenset())
+        self.assertEqual(knot["reinforced"], 0)
+
 
 class TestStats(unittest.TestCase):
     def test_reports_density(self):
