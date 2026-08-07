@@ -481,16 +481,55 @@ produced obviously wrong ones.
     every other respect, where turning `BURST_WEIGHT` on flips which
     knot survives: the once-oldest-but-clustered knot lives, the
     isolated one dies instead. 136/136 tests total.
-  - **Not ported to the JS extension** (`qontext.js`/`qontext_chat.js`)
-    — same gap as the `qontext-live` sync above, now a third file that
-    can drift. Deliberately left alone rather than porting an unverified,
-    off-by-default mechanism into two more places before it's proven
-    worth having anywhere.
+  - **Ported to `qontext.js` (RPMemory, the SillyTavern extension build)
+    in a follow-up round — see entry below.** Not ported to
+    `qontext_chat.js` (the static-demo chat build); that gap remains.
   - To actually evaluate it: set `BURST_WEIGHT` above 0 and re-run
     `bench/long_bench.py` or `bench/turn_bench.py` against the local
     model server, which this sandbox cannot reach. Until that happens,
     treat this exactly like `INDEX_TERMS` before its retraction — a
     reasonable-sounding idea, not a demonstrated one.
+
+- **Burst density ported into `qontext.js`'s `RPMemory`** (the class the
+  SillyTavern extension actually uses), user-requested so it could be
+  felt in a real roleplay session rather than left Python-only. Same
+  shape as the Python original: `BURST_WINDOW_MS`/`BURST_WEIGHT` module
+  constants (`BURST_WEIGHT` defaults to `0`, still unverified), a
+  `_burstCounts()` two-pointer sweep, wiring into `_score()` and
+  `_evict()`, and a public `burstiness()` read method. `ts` is
+  `Date.now()` in this file rather than Python's `time.time()`, so the
+  window is expressed in milliseconds (120000 = Python's 120 seconds) to
+  keep the *meaning* — "two minutes" — the same across both languages
+  even though the unit differs.
+  - **Found a second, independent persistence bug while doing this**:
+    `qontext.js`'s `serialize()`/`deserialize()` (a JS-only feature —
+    `qontext_rp.py` itself has no save/load at all, so there was no
+    Python fix to port here) already wrote `reinforced` to its output,
+    but `deserialize()` never read it back. `deserialize()` rebuilds a
+    memory by calling `_add()` on just the surviving knots in original
+    order, which reruns `_supersede()` — but since only survivors are
+    present, no supersession event fires during replay, so `_add()`
+    always computes a fresh `reinforced` of 0, and nothing overwrote it
+    with the saved value the way `hits` and `imp` already were. Same
+    class of bug as `qontext_memory.py`'s Round 2 fix (data written,
+    never restored, silently resetting every reload), found independently
+    in a file with no shared code path to the one already fixed. One line
+    (`record.reinforced = k.reinforced ?? 0;`).
+  - Verified with `extension/parity.mjs` (24/24, unchanged — confirms
+    BURST_WEIGHT=0 is a true no-op end to end, not just in isolation) and
+    `extension/parity_chat.mjs` (50/50, unaffected — this file wasn't
+    touched). No existing test harness here covers RPMemory features with
+    no Python counterpart to diff against (burst density, the persistence
+    fix), so added `extension/test_burst_and_persistence.mjs` in the same
+    hand-rolled style as `parity.mjs` — 6/6 checks: burst counts correct
+    on a deliberately time-clustered fixture, `scene()` output identical
+    with the new machinery present but inert, and `reinforced` surviving
+    a serialize/deserialize round-trip it previously did not.
+  - Not exposed in the extension's settings UI (`index.js`'s
+    `DEFAULTS`/`settings()`) — `BURST_WEIGHT` stays a module constant you'd
+    edit directly in `qontext.js` to try, same as it is in Python. Adding
+    a settings-panel toggle is a reasonable next step if the mechanism is
+    ever validated, not before.
 
 ## Facts about the environment
 

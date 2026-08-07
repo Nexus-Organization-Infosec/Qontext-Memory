@@ -26,6 +26,20 @@ export const SCENE_RESERVE = 0.5;   // roleplay default; 0.0 for assistant chat
 export const GAZETTEER_MIN = 2;
 export const DIALOGUE_MIN = 20;
 
+// Burst density: how many other knots landed within BURST_WINDOW_MS of this
+// one -- a flurry of knots in one frantic minute scores higher than a knot
+// that arrived into a quiet stretch. Ported from qontext_memory.py's
+// BURST_WEIGHT/BURST_WINDOW (there measured in seconds; here in
+// milliseconds, since `ts` is `Date.now()`, not `time.time()`).
+//
+// Same status as the Python original: UNVERIFIED and off by default. It
+// ships here so it can be felt in a real roleplay session, not because it
+// has been measured on this port -- there is no JS-side benchmark that
+// plays the role long_bench.py/turn_bench.py play for the Python library.
+// BURST_WEIGHT=0 makes every burst-aware code path below a true no-op.
+export const BURST_WINDOW_MS = 120000;   // 2 minutes
+export const BURST_WEIGHT = 0;           // how strongly burst sways ranking/eviction (0 = off)
+
 // Cords: how knots hang together, recorded at write time and walked at read
 // time. Measured across 11 logs at budget 1200, turn-shaped queries:
 //
@@ -570,14 +584,67 @@ export class RPMemory {
         return sum / record.w.size;
     }
 
+    // Per-knot count of other knots within BURST_WINDOW_MS -- recomputed
+    // from current timestamps every time, not cached on the knot, so it
+    // stays correct as more knots land near an existing one later. A
+    // sliding window over knots sorted by `ts`: O(n log n) for the sort,
+    // O(n) for the sweep itself, not the O(n^2) a naive per-knot scan
+    // would be. Ported from qontext_memory.py's `_burst_counts`.
+    _burstCounts() {
+        const knots = this.knots;
+        const n = knots.length;
+        const counts = new Map();
+        if (n < 2) {
+            for (const k of knots) counts.set(k.seq, 0);
+            return counts;
+        }
+        const order = [...knots.keys()].sort((a, b) => knots[a].ts - knots[b].ts);
+        const out = new Array(n).fill(0);
+        let lo = 0;
+        let hi = 0;
+        for (let pos = 0; pos < n; pos += 1) {
+            const t = knots[order[pos]].ts;
+            while (knots[order[lo]].ts < t - BURST_WINDOW_MS) lo += 1;
+            if (hi < pos) hi = pos;
+            while (hi + 1 < n && knots[order[hi + 1]].ts <= t + BURST_WINDOW_MS) hi += 1;
+            out[order[pos]] = hi - lo;   // neighbours, excluding self
+        }
+        for (let i = 0; i < n; i += 1) counts.set(knots[i].seq, out[i]);
+        return counts;
+    }
+
+    // [text, count] per knot, oldest first. Read-only metadata, always
+    // available regardless of BURST_WEIGHT -- independent of whether that
+    // weight is currently making the count *act* on ranking or eviction.
+    burstiness() {
+        const counts = this._burstCounts();
+        return this.knots.map((k) => [k.text, counts.get(k.seq) ?? 0]);
+    }
+
+    // 1.0 (a true no-op) when BURST_WEIGHT is 0 or the knot has no
+    // temporal neighbours. Otherwise grows with the log of the neighbour
+    // count, the same log(1+x) shape _rarity and _weights already use, so
+    // one extremely frantic cluster cannot dominate the way a raw count
+    // would.
+    _burstFactor(record, counts) {
+        if (!BURST_WEIGHT || !counts) return 1.0;
+        const count = counts.get(record.seq) ?? 0;
+        if (!count) return 1.0;
+        return 1.0 + BURST_WEIGHT * Math.log(1 + count);
+    }
+
     // Importance nudges distinctiveness, never outranks it. Two stronger
-    // versions were measured in Python and both were worse.
+    // versions were measured in Python and both were worse. Burst density
+    // (see BURST_WEIGHT) nudges the same way and is a no-op at the default
+    // weight of 0 -- multiplying by 1.0 changes nothing.
     _evict() {
         const overflow = this.knots.length - this.maxEntries;
         if (overflow <= 0) return;
+        const burstCounts = BURST_WEIGHT ? this._burstCounts() : null;
         const ranked = [...this.knots].sort((a, b) =>
             a.hits - b.hits
-            || this._rarity(a) * (1 + a.imp / 5) - this._rarity(b) * (1 + b.imp / 5)
+            || this._rarity(a) * (1 + a.imp / 5) * this._burstFactor(a, burstCounts)
+               - this._rarity(b) * (1 + b.imp / 5) * this._burstFactor(b, burstCounts)
             || a.seq - b.seq);
         this._drop(ranked.slice(0, overflow));
     }
@@ -601,7 +668,7 @@ export class RPMemory {
         return weights;
     }
 
-    _score(record, expanded, aboutUser, weights) {
+    _score(record, expanded, aboutUser, weights, burstCounts = null) {
         let overlap = 0;
         for (const t of expanded) if (record.w.has(t)) overlap += weights.get(t);
         if (overlap && aboutUser && SUBJECT_FOCUS) {
@@ -609,6 +676,9 @@ export class RPMemory {
             const firstParty = (text.includes('the user') || text.includes('the team'))
                 && !CHAINED_POSSESSIVE.test(text);
             if (!firstParty) overlap *= (1 - SUBJECT_FOCUS);
+        }
+        if (overlap && BURST_WEIGHT && burstCounts) {
+            overlap *= this._burstFactor(record, burstCounts);
         }
         if (overlap && LENGTH_NORM) {
             overlap *= Math.pow(
@@ -628,7 +698,9 @@ export class RPMemory {
             for (const s of this.index.get(token) ?? []) seqs.add(s);
         }
         const pool = [...seqs].map((s) => this.bySeq.get(s)).filter(Boolean);
-        const scored = pool.map((k) => [this._score(k, expanded, aboutUser, weights), k]);
+        const burstCounts = BURST_WEIGHT ? this._burstCounts() : null;
+        const scored = pool.map((k) =>
+            [this._score(k, expanded, aboutUser, weights, burstCounts), k]);
         scored.sort((a, b) => b[0][0] - a[0][0] || b[0][1] - a[0][1] || b[0][2] - a[0][2]);
         return scored;
     }
@@ -739,6 +811,15 @@ export class RPMemory {
                 const record = memory.knots[memory.knots.length - 1];
                 record.hits = k.hits ?? 0;
                 record.imp = k.imp ?? record.imp;
+                // `reinforced` was already written by serialize() but never
+                // read back here -- deserialize() rebuilds from just the
+                // survivors, so _add()'s own _supersede() never sees the
+                // corrections that produced this count and always
+                // recomputes 0. Same class of bug as the Python
+                // serialize()/deserialize() fix (FORMAT_VERSION 2 -> 3):
+                // data written, never restored, silently resetting on
+                // every save/load cycle.
+                record.reinforced = k.reinforced ?? 0;
             }
         }
         return memory;
