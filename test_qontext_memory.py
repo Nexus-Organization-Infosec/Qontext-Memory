@@ -941,6 +941,111 @@ class TestCandidates(unittest.TestCase):
         self.assertTrue(any("Marta" in c for c in mem.candidates(3)))
 
 
+class TestBurstDensity(unittest.TestCase):
+    """burstiness() / BURST_WEIGHT: how many other knots landed within
+    BURST_WINDOW seconds of each one. UNVERIFIED and off by default (see
+    the constant's comment) -- these tests only check the mechanism is
+    correct and inert at BURST_WEIGHT=0, not that it improves retrieval;
+    that needs a real benchmark against the local model server."""
+
+    @staticmethod
+    def _set_times(mem, *seconds):
+        """Force each knot's ts, oldest-observed first, to make the
+        temporal clustering deterministic instead of depending on how fast
+        the test runs."""
+        for k, t in zip(mem._knots, seconds):
+            k["ts"] = float(t)
+
+    def test_empty_memory_burstiness_is_empty(self):
+        self.assertEqual(QontextMemory().burstiness(), [])
+
+    def test_single_knot_has_zero_neighbours(self):
+        mem = QontextMemory()
+        mem.observe("user", "People call me Marta.")
+        self.assertEqual(mem.burstiness(), [(mem.entries()[0], 0)])
+
+    def test_a_cluster_counts_each_other_a_lonely_knot_counts_none(self):
+        import qontext_memory as qm
+        mem = QontextMemory()
+        for i in range(4):
+            mem.observe("user", "The gym was busy on day %d." % i)
+        mem.observe("user", "People call me Marta.")
+        previous = qm.BURST_WINDOW
+        try:
+            qm.BURST_WINDOW = 10.0
+            # first four land in the same ten-second window (a "burst");
+            # the Marta knot lands ten minutes later, alone.
+            self._set_times(mem, 0.0, 1.0, 2.0, 3.0, 600.0)
+            counts = mem.burstiness()
+            gym_counts = [c for text, c in counts if "gym" in text]
+            marta_counts = [c for text, c in counts if "Marta" in text]
+            self.assertEqual(gym_counts, [3, 3, 3, 3])
+            self.assertEqual(marta_counts, [0])
+        finally:
+            qm.BURST_WINDOW = previous
+
+    def test_burst_weight_zero_is_a_true_no_op(self):
+        """The default (0) must not just score low -- it must produce
+        bit-for-bit the same pack() and _evict() ordering as before this
+        feature existed, on a memory with a real, deliberately clustered
+        burst sitting in it."""
+        mem = QontextMemory(max_entries=6)
+        for i in range(5):
+            mem.observe("user", "The gym was busy on day %d." % i)
+        mem.observe("user", "People call me Marta.")
+        self._set_times(mem, 0.0, 1.0, 2.0, 3.0, 4.0, 90000.0)
+        before_pack = mem.pack("gym", 300)
+        before_entries = list(mem.entries())
+        again = QontextMemory(max_entries=6)
+        for i in range(5):
+            again.observe("user", "The gym was busy on day %d." % i)
+        again.observe("user", "People call me Marta.")
+        self._set_times(again, 0.0, 1.0, 2.0, 3.0, 4.0, 90000.0)
+        self.assertEqual(again.pack("gym", 300), before_pack)
+        self.assertEqual(list(again.entries()), before_entries)
+
+    def test_burst_weight_can_change_eviction_order(self):
+        """Five knots, deliberately symmetric: same shared vocabulary (so
+        identical rarity), same importance tier, never retrieved (hits=0)
+        -- so with BURST_WEIGHT off, eviction's only remaining tie-break is
+        insertion order, and the *oldest* (day 0) must die first. Four of
+        the five share a ten-second window (a burst); the fifth is alone
+        ninety thousand seconds later. With BURST_WEIGHT on, the burst
+        members become harder to evict than an isolated knot of otherwise
+        identical standing, which flips who dies: the lone one, not the
+        oldest. Proves the signal actually reaches _evict()'s ordering."""
+        import qontext_memory as qm
+        previous_w, previous_win = qm.BURST_WEIGHT, qm.BURST_WINDOW
+        try:
+            qm.BURST_WEIGHT = 0.0
+            qm.BURST_WINDOW = 10.0
+
+            baseline = QontextMemory(max_entries=5)
+            for i in range(5):
+                baseline.observe("user", "The gym was busy on day %d." % i)
+            self._set_times(baseline, 0.0, 1.0, 2.0, 3.0, 90000.0)
+            baseline.max_entries = 4
+            baseline._evict()
+            self.assertNotIn("day 0", " ".join(baseline.entries()),
+                             "tie-broken baseline must evict the oldest")
+            self.assertIn("day 4", " ".join(baseline.entries()))
+
+            weighted = QontextMemory(max_entries=5)
+            for i in range(5):
+                weighted.observe("user", "The gym was busy on day %d." % i)
+            self._set_times(weighted, 0.0, 1.0, 2.0, 3.0, 90000.0)
+            qm.BURST_WEIGHT = 5.0
+            weighted.max_entries = 4
+            weighted._evict()
+            texts = " ".join(weighted.entries())
+            self.assertIn("day 0", texts,
+                          "burst membership must protect the oldest now")
+            self.assertNotIn("day 4", texts,
+                             "the lone, unburstable knot dies instead")
+        finally:
+            qm.BURST_WEIGHT, qm.BURST_WINDOW = previous_w, previous_win
+
+
 class TestWideBridgeCandidateSelection(unittest.TestCase):
     """pack()'s wide_bridge call must use candidates(), not raw entries()
     order -- and the cheap `bridge` path must be completely unaffected,

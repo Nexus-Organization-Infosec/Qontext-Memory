@@ -17,7 +17,7 @@ the full transcript, because attention is scarcer than context.
     mem.save("qontext.qx")
 
 API: observe · add · pack · entries · forget · clear · explain · stats ·
-serialize / deserialize · save / load.
+burstiness · serialize / deserialize · save / load.
 
 Standard library only, single file, no side effects on import. Thread-safe.
 Python 3.8+.
@@ -81,6 +81,26 @@ REFERENCE_LENGTH = 40       # knots under this length are not penalised
 # chained possessive moves the subject elsewhere: "the user's neighbour's dog"
 # is the neighbour's dog, however many times it says "user".
 SUBJECT_FOCUS = 0.4         # how much to damp knots about a different subject
+
+# Burst density: how many other knots landed within BURST_WINDOW seconds of
+# this one. A knot born alone in a quiet week and a knot born in the middle
+# of a five-message flurry are not equally likely to matter the same way --
+# the flurry is where urgency lives, the way a Quipu weaver spaced knots
+# tightly for a siege and widely for a season of farming. Unlike IMPORTANCE
+# (a property of a knot's *text*) this is a property of a knot's *company*:
+# recomputed from the whole memory's current timestamps every time it is
+# asked for, not stored on the knot, so a knot's burst count correctly grows
+# if more knots land near it later, and correctly does not survive a
+# save/load round-trip that changes nothing about *when* things happened.
+#
+# UNVERIFIED — off by default, exactly like INDEX_TERMS after its retraction
+# above. This project's own history (INDEX_TERMS, COVERAGE_GATE) is the
+# reason this ships gated rather than on: a plausible-sounding signal is not
+# a measured one. BURST_WEIGHT=0 makes every burst-aware code path a no-op;
+# set it and re-run bench/long_bench.py or bench/turn_bench.py before
+# trusting it on real data.
+BURST_WINDOW = 120.0        # seconds; knots this close in time share a burst
+BURST_WEIGHT = 0.0          # how strongly burst density sways ranking/eviction (0 = off)
 
 # Hidden index terms: words from the turn a knot came from, used for matching
 # and never shown to the model.
@@ -1430,6 +1450,66 @@ class QontextMemory:
         return sum(math.log(1.0 + total / (1.0 + len(self._index.get(t) or ())))
                    for t in record["w"]) / len(record["w"])
 
+    def _burst_counts(self):
+        """Per-knot count of other knots within BURST_WINDOW seconds.
+
+        Recomputed from current timestamps, not cached on the knot — see the
+        BURST_WEIGHT comment for why. A standard sliding window over the
+        knots sorted by `ts`: as the window's centre moves forward through
+        sorted order, both edges only ever advance, so the whole sweep is
+        O(n log n) (the sort; the sweep itself is O(n)), not the O(n^2) a
+        naive per-knot scan would be — the exact class of cost this file
+        already paid down once for `add()` (see `_overlapping`'s docstring,
+        "26 seconds to load ten thousand knots").
+
+        Returns {seq: count}. Caller holds the lock.
+        """
+        knots = self._knots
+        n = len(knots)
+        if n < 2:
+            return {k["seq"]: 0 for k in knots}
+        order = sorted(range(n), key=lambda i: knots[i]["ts"])
+        counts = [0] * n
+        lo = hi = 0
+        for pos in range(n):
+            t = knots[order[pos]]["ts"]
+            while knots[order[lo]]["ts"] < t - BURST_WINDOW:
+                lo += 1
+            if hi < pos:
+                hi = pos
+            while hi + 1 < n and knots[order[hi + 1]]["ts"] <= t + BURST_WINDOW:
+                hi += 1
+            counts[order[pos]] = hi - lo   # neighbours, excluding self
+        return {knots[i]["seq"]: counts[i] for i in range(n)}
+
+    def burstiness(self):
+        """[(text, count)] — how many other stored knots landed within
+        BURST_WINDOW seconds of each one, oldest knot first.
+
+        Read-only and always available regardless of BURST_WEIGHT: this is
+        the "metadata" half of burst density, independent of whether
+        BURST_WEIGHT is currently making it *act* on ranking or eviction.
+        A high count marks a knot born in a flurry of activity; a low one,
+        a knot that arrived into a quiet stretch.
+        """
+        with self._lock:
+            counts = self._burst_counts()
+            return [(k["text"], counts.get(k["seq"], 0)) for k in self._knots]
+
+    def _burst_factor(self, record, counts):
+        """1.0 when BURST_WEIGHT is 0 or the knot has no temporal neighbours
+        -- a true no-op in that case, not just a small number. Otherwise
+        grows with the log of the neighbour count, same shape as `_rarity`'s
+        and `_weights`' log(1+x) scaling elsewhere in this file, so one
+        extremely frantic cluster cannot dominate the way a raw count would.
+        """
+        if not BURST_WEIGHT:
+            return 1.0
+        count = counts.get(record["seq"], 0)
+        if not count:
+            return 1.0
+        return 1.0 + BURST_WEIGHT * math.log(1.0 + count)
+
     def _evict(self):
         """Keep the memory bounded. Caller holds the lock.
 
@@ -1447,10 +1527,14 @@ class QontextMemory:
         # chatter that happens to say "meeting" survive while "Docs are in
         # Notion" — distinctive, but in no importance category — was evicted.
         # Rarity is what separates a fact from filler; importance only says
-        # how much that fact is worth once it has qualified.
+        # how much that fact is worth once it has qualified. Burst density
+        # (see BURST_WEIGHT) nudges the same way and is a no-op at the
+        # default weight of 0 -- multiplying by 1.0 changes nothing.
+        burst_counts = self._burst_counts() if BURST_WEIGHT else {}
         ranked = sorted(self._knots,
                         key=lambda k: (k["hits"],
-                                       self._rarity(k) * (1 + k.get("imp", 1.0) / 5.0),
+                                       self._rarity(k) * (1 + k.get("imp", 1.0) / 5.0)
+                                       * self._burst_factor(k, burst_counts),
                                        k["seq"]))
         self._drop(ranked[:overflow])
 
@@ -1567,7 +1651,7 @@ class QontextMemory:
             weights[token] = math.log(1.0 + total / (1.0 + df))
         return weights
 
-    def _score(self, record, expanded, about_user, weights):
+    def _score(self, record, expanded, about_user, weights, burst_counts=None):
         matched = expanded & record["w"]
         overlap = sum(weights[t] for t in matched)
         # A word that was near the knot is weaker evidence than a word in it.
@@ -1585,6 +1669,8 @@ class QontextMemory:
         # Between two knots that answer equally well, take the denser one.
         if overlap and IMPORTANCE_RANK:
             overlap *= (record.get("imp", 1.0) / 3.0) ** IMPORTANCE_RANK
+        if overlap and BURST_WEIGHT and burst_counts is not None:
+            overlap *= self._burst_factor(record, burst_counts)
         if overlap and LENGTH_NORM:
             overlap *= (REFERENCE_LENGTH / max(len(record["text"]),
                                                REFERENCE_LENGTH)) ** LENGTH_NORM
@@ -1645,7 +1731,8 @@ class QontextMemory:
         weights = self._weights(expanded)
         for token in associated:
             weights[token] *= ASSOCIATION_WEIGHT
-        scored = [(self._score(k, expanded, about_user, weights), k)
+        burst_counts = self._burst_counts() if BURST_WEIGHT else None
+        scored = [(self._score(k, expanded, about_user, weights, burst_counts), k)
                   for k in pool]
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return scored

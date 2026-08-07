@@ -448,6 +448,50 @@ produced obviously wrong ones.
     deliberate frozen snapshot or should track `qontext-memory/` — as-is,
     nothing keeps them in sync automatically.
 
+- **`BURST_WEIGHT`/`BURST_WINDOW` — burst density, a new UNVERIFIED,
+  off-by-default signal.** User-requested feature (not part of the
+  ultragoal pass above): how many other knots landed within
+  `BURST_WINDOW` seconds of a given one — a flurry of five knots in one
+  minute scores higher than a knot that arrived into a quiet week.
+  Recomputed from current timestamps every time it's asked for (an
+  `O(n log n)` sweep, `_burst_counts()`), not stored on the knot, so it
+  stays correct as more knots land near an existing one later and does
+  not need a `FORMAT_VERSION` bump.
+  - Three integration points, matching the request to treat this as one
+    property rather than three separate toggles: `_score()` (ranking,
+    gated by `BURST_WEIGHT`, same pattern as `IMPORTANCE_RANK`),
+    `_evict()` (survival, same pattern as the existing `imp` nudge on
+    `_rarity()`), and a new public read method `burstiness()` (metadata,
+    always available regardless of the weight, since it's just
+    descriptive).
+  - `BURST_WEIGHT` defaults to `0.0` — same discipline as `INDEX_TERMS`
+    post-retraction: the *mechanism* is plausible and internally
+    consistent (Quipu weavers really did space knots by the intensity of
+    what they recorded), but nothing about it has been measured against
+    real retrieval yet. It ships off, tested for correctness and
+    performance (3000 knots: `_burst_counts()` in ~1ms, a full `pack()`
+    call with the weight on in ~5ms — no meaningful cost), not for
+    proven benefit.
+  - Five new tests (`TestBurstDensity`): count correctness on a
+    deliberately time-clustered fixture, a true-no-op check at the
+    default weight (byte-identical `pack()`/`entries()` output against a
+    twin memory with the feature absent from the comparison entirely),
+    and — the one that actually proves the wiring works, not just that
+    it computes a number — a five-knot eviction scenario, symmetric in
+    every other respect, where turning `BURST_WEIGHT` on flips which
+    knot survives: the once-oldest-but-clustered knot lives, the
+    isolated one dies instead. 136/136 tests total.
+  - **Not ported to the JS extension** (`qontext.js`/`qontext_chat.js`)
+    — same gap as the `qontext-live` sync above, now a third file that
+    can drift. Deliberately left alone rather than porting an unverified,
+    off-by-default mechanism into two more places before it's proven
+    worth having anywhere.
+  - To actually evaluate it: set `BURST_WEIGHT` above 0 and re-run
+    `bench/long_bench.py` or `bench/turn_bench.py` against the local
+    model server, which this sandbox cannot reach. Until that happens,
+    treat this exactly like `INDEX_TERMS` before its retraction — a
+    reasonable-sounding idea, not a demonstrated one.
+
 ## Facts about the environment
 
 - Logs `log8.txt` / `log12.txt` are excluded in code after a content screen.
