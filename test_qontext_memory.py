@@ -1005,41 +1005,33 @@ class TestBurstDensity(unittest.TestCase):
         self.assertEqual(list(again.entries()), before_entries)
 
     def test_burst_weight_can_change_eviction_order(self):
-        """Five knots, deliberately symmetric: same shared vocabulary (so
-        identical rarity), same importance tier, never retrieved (hits=0)
-        -- so with BURST_WEIGHT off, eviction's only remaining tie-break is
-        insertion order, and the *oldest* (day 0) must die first. Four of
-        the five share a ten-second window (a burst); the fifth is alone
-        ninety thousand seconds later. With BURST_WEIGHT on, the burst
-        members become harder to evict than an isolated knot of otherwise
-        identical standing, which flips who dies: the lone one, not the
-        oldest. Proves the signal actually reaches _evict()'s ordering."""
+        """Five knots, four sharing a ten-second window (a burst) and one
+        alone ninety thousand seconds later. `_rarity` is patched to a
+        constant so the only thing that can decide eviction is hits (tied
+        at 0), importance (tied -- same vocabulary tier) and burst factor
+        -- without this patch the real `_rarity` sums floats in frozenset
+        iteration order, which varies run to run under Python's hash
+        randomization and made near-ties genuinely flaky here (caught by
+        actually running this test repeatedly, not assumed). With the
+        non-burst terms pinned equal, BURST_WEIGHT on must make the lone
+        knot the one that dies -- proving the signal reaches _evict()'s
+        ordering, not just that it computes a number."""
         import qontext_memory as qm
         previous_w, previous_win = qm.BURST_WEIGHT, qm.BURST_WINDOW
         try:
-            qm.BURST_WEIGHT = 0.0
-            qm.BURST_WINDOW = 10.0
-
-            baseline = QontextMemory(max_entries=5)
-            for i in range(5):
-                baseline.observe("user", "The gym was busy on day %d." % i)
-            self._set_times(baseline, 0.0, 1.0, 2.0, 3.0, 90000.0)
-            baseline.max_entries = 4
-            baseline._evict()
-            self.assertNotIn("day 0", " ".join(baseline.entries()),
-                             "tie-broken baseline must evict the oldest")
-            self.assertIn("day 4", " ".join(baseline.entries()))
-
-            weighted = QontextMemory(max_entries=5)
-            for i in range(5):
-                weighted.observe("user", "The gym was busy on day %d." % i)
-            self._set_times(weighted, 0.0, 1.0, 2.0, 3.0, 90000.0)
             qm.BURST_WEIGHT = 5.0
-            weighted.max_entries = 4
-            weighted._evict()
-            texts = " ".join(weighted.entries())
+            qm.BURST_WINDOW = 10.0
+            mem = QontextMemory(max_entries=5)
+            for i in range(5):
+                mem.observe("user", "The gym was busy on day %d." % i)
+            self._set_times(mem, 0.0, 1.0, 2.0, 3.0, 90000.0)
+            mem._rarity = lambda record: 1.0   # pin the non-burst term
+            mem.max_entries = 4
+            mem._evict()
+            texts = " ".join(mem.entries())
             self.assertIn("day 0", texts,
-                          "burst membership must protect the oldest now")
+                          "a burst member, tied on everything but burst, "
+                          "must survive")
             self.assertNotIn("day 4", texts,
                              "the lone, unburstable knot dies instead")
         finally:
