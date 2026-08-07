@@ -29,6 +29,10 @@ const DEFAULTS = {
     maxEntries: 800,
     capture: false,         // write a transcript for later evaluation
     header: 'Things established earlier in this scene:',
+    // Burst density: UNVERIFIED, off by default -- see qontext.js's
+    // BURST_WEIGHT comment. 0 makes it a true no-op, same as upstream.
+    burstWeight: 0,          // how strongly burst density sways ranking/eviction
+    burstWindowSec: 120,     // seconds; knots this close in time share a burst
 };
 
 let memory = null;
@@ -58,6 +62,8 @@ function rebuild(chat, chatId) {
         maxEntries: config.maxEntries,
         reserve: config.reserve,
         useCords: config.useCords,
+        burstWeight: config.burstWeight,
+        burstWindowMs: config.burstWindowSec * 1000,
     });
     for (const message of chat) {
         if (message.is_system) continue;
@@ -205,6 +211,19 @@ const HTML = `
       </label>
 
       <hr>
+      <label for="qontext_burst_weight">Burst weight:
+        <span id="qontext_burst_weight_val"></span></label>
+      <input id="qontext_burst_weight" type="range" min="0" max="5" step="0.1">
+      <label for="qontext_burst_window">Burst window:
+        <span id="qontext_burst_window_val"></span></label>
+      <input id="qontext_burst_window" type="range" min="10" max="600" step="10">
+      <small><b>UNVERIFIED, off by default (0).</b> How many other knots
+      landed close together in time -- a flurry scores higher than a knot
+      that arrived into a quiet stretch. No benchmark backs this yet, only
+      correctness tests; treat higher values as an experiment to feel out,
+      not a setting known to help. See HANDOFF.md for the full story.</small>
+
+      <hr>
       <label class="checkbox_label">
         <input id="qontext_capture" type="checkbox">
         Log sessions for evaluation
@@ -219,6 +238,12 @@ const HTML = `
   </div>
 </div>`;
 
+function windowLabel(sec) {
+    if (sec < 60) return `${sec}s`;
+    const min = sec / 60;
+    return `${sec}s (${min % 1 === 0 ? min : min.toFixed(1)} min)`;
+}
+
 function bind() {
     const config = settings();
     $('#qontext_mode').val(config.mode);
@@ -227,6 +252,11 @@ function bind() {
     $('#qontext_recency').val(config.recency);
     $('#qontext_cords').prop('checked', config.useCords);
     $('#qontext_capture').prop('checked', config.capture);
+    $('#qontext_burst_weight').val(config.burstWeight);
+    $('#qontext_burst_weight_val').text(
+        config.burstWeight === 0 ? '0 (off)' : config.burstWeight.toFixed(1));
+    $('#qontext_burst_window').val(config.burstWindowSec);
+    $('#qontext_burst_window_val').text(windowLabel(config.burstWindowSec));
 
     const save = (key, cast) => (event) => {
         settings()[key] = cast(event.target);
@@ -241,6 +271,21 @@ function bind() {
     $('#qontext_capture').on('change', save('capture', (t) => t.checked));
     $('#qontext_pick').on('click', () => chooseFolder().catch(console.error));
 
+    // Sliders: update the visible readout continuously (input), but only
+    // persist + trigger a memory rebuild once the user lets go (change) --
+    // rebuilding on every intermediate drag position would thrash the
+    // memory for no benefit, the same reasoning the other fields already
+    // follow by using `change` rather than `input`.
+    $('#qontext_burst_weight').on('input', (event) => {
+        const value = Number(event.target.value);
+        $('#qontext_burst_weight_val').text(value === 0 ? '0 (off)' : value.toFixed(1));
+    });
+    $('#qontext_burst_weight').on('change', save('burstWeight', (t) => Number(t.value)));
+    $('#qontext_burst_window').on('input', (event) => {
+        $('#qontext_burst_window_val').text(windowLabel(Number(event.target.value)));
+    });
+    $('#qontext_burst_window').on('change', save('burstWindowSec', (t) => Number(t.value)));
+
     $('#qontext_stats').on('click', () => {
         const context = getContext();
         const chat = context.chat || [];
@@ -249,10 +294,24 @@ function bind() {
         const pack = memory.scene(lastUser ? lastUser.mes : '',
                                   settings().budget);
         const s = memory.stats();
-        $('#qontext_out').text(
-            `${s.entries} knots from ${s.observed_chars} chars ` +
+        let out = `${s.entries} knots from ${s.observed_chars} chars ` +
             `(density ${s.density.toFixed(2)}), cast ${s.cast}\n\n` +
-            `pack for the last turn:\n${pack || '(empty)'}`);
+            `pack for the last turn:\n${pack || '(empty)'}`;
+        // Only shown when the weight is on -- with it at 0 the numbers are
+        // real (burstiness() always computes) but meaningless to look at,
+        // since nothing in ranking or eviction is reading them yet.
+        if (s.burst_weight) {
+            const top = memory.burstiness()
+                .filter(([, count]) => count > 0)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5);
+            out += `\n\nburst weight ${s.burst_weight}, window ` +
+                `${s.burst_window_ms / 1000}s -- most clustered knots:\n` +
+                (top.length
+                    ? top.map(([text, count]) => `  [${count}] ${text}`).join('\n')
+                    : '  (none -- nothing landed close together in time)');
+        }
+        $('#qontext_out').text(out);
     });
 }
 

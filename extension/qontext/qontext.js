@@ -354,10 +354,17 @@ function sameSet(a, b) {
 
 export class RPMemory {
     constructor({ maxEntries = 800, reserve = SCENE_RESERVE,
-                  useCords = USE_CORDS } = {}) {
+                  useCords = USE_CORDS, burstWeight = BURST_WEIGHT,
+                  burstWindowMs = BURST_WINDOW_MS } = {}) {
         this.maxEntries = maxEntries;
         this.reserve = Math.max(0, Math.min(1, reserve));
         this.useCords = useCords;
+        // Per-instance, not module-level, so a UI slider can change this for
+        // one memory without a page-wide side effect — same reasoning as
+        // `reserve` above. The module constants remain the defaults used
+        // when no option is passed (e.g. from node scripts, parity.mjs).
+        this.burstWeight = Math.max(0, burstWeight);
+        this.burstWindowMs = Math.max(0, burstWindowMs);
         this.cords = new Map();      // seq -> Map(seq -> weight)
         this.revised = new Map();    // seq -> [text replaced]
         this.lastTurn = [];
@@ -584,7 +591,7 @@ export class RPMemory {
         return sum / record.w.size;
     }
 
-    // Per-knot count of other knots within BURST_WINDOW_MS -- recomputed
+    // Per-knot count of other knots within this.burstWindowMs -- recomputed
     // from current timestamps every time, not cached on the knot, so it
     // stays correct as more knots land near an existing one later. A
     // sliding window over knots sorted by `ts`: O(n log n) for the sort,
@@ -598,15 +605,16 @@ export class RPMemory {
             for (const k of knots) counts.set(k.seq, 0);
             return counts;
         }
+        const window = this.burstWindowMs;
         const order = [...knots.keys()].sort((a, b) => knots[a].ts - knots[b].ts);
         const out = new Array(n).fill(0);
         let lo = 0;
         let hi = 0;
         for (let pos = 0; pos < n; pos += 1) {
             const t = knots[order[pos]].ts;
-            while (knots[order[lo]].ts < t - BURST_WINDOW_MS) lo += 1;
+            while (knots[order[lo]].ts < t - window) lo += 1;
             if (hi < pos) hi = pos;
-            while (hi + 1 < n && knots[order[hi + 1]].ts <= t + BURST_WINDOW_MS) hi += 1;
+            while (hi + 1 < n && knots[order[hi + 1]].ts <= t + window) hi += 1;
             out[order[pos]] = hi - lo;   // neighbours, excluding self
         }
         for (let i = 0; i < n; i += 1) counts.set(knots[i].seq, out[i]);
@@ -614,33 +622,32 @@ export class RPMemory {
     }
 
     // [text, count] per knot, oldest first. Read-only metadata, always
-    // available regardless of BURST_WEIGHT -- independent of whether that
+    // available regardless of burstWeight -- independent of whether that
     // weight is currently making the count *act* on ranking or eviction.
     burstiness() {
         const counts = this._burstCounts();
         return this.knots.map((k) => [k.text, counts.get(k.seq) ?? 0]);
     }
 
-    // 1.0 (a true no-op) when BURST_WEIGHT is 0 or the knot has no
-    // temporal neighbours. Otherwise grows with the log of the neighbour
-    // count, the same log(1+x) shape _rarity and _weights already use, so
-    // one extremely frantic cluster cannot dominate the way a raw count
-    // would.
+    // 1.0 (a true no-op) when burstWeight is 0 or the knot has no temporal
+    // neighbours. Otherwise grows with the log of the neighbour count, the
+    // same log(1+x) shape _rarity and _weights already use, so one
+    // extremely frantic cluster cannot dominate the way a raw count would.
     _burstFactor(record, counts) {
-        if (!BURST_WEIGHT || !counts) return 1.0;
+        if (!this.burstWeight || !counts) return 1.0;
         const count = counts.get(record.seq) ?? 0;
         if (!count) return 1.0;
-        return 1.0 + BURST_WEIGHT * Math.log(1 + count);
+        return 1.0 + this.burstWeight * Math.log(1 + count);
     }
 
     // Importance nudges distinctiveness, never outranks it. Two stronger
     // versions were measured in Python and both were worse. Burst density
-    // (see BURST_WEIGHT) nudges the same way and is a no-op at the default
+    // (see burstWeight) nudges the same way and is a no-op at the default
     // weight of 0 -- multiplying by 1.0 changes nothing.
     _evict() {
         const overflow = this.knots.length - this.maxEntries;
         if (overflow <= 0) return;
-        const burstCounts = BURST_WEIGHT ? this._burstCounts() : null;
+        const burstCounts = this.burstWeight ? this._burstCounts() : null;
         const ranked = [...this.knots].sort((a, b) =>
             a.hits - b.hits
             || this._rarity(a) * (1 + a.imp / 5) * this._burstFactor(a, burstCounts)
@@ -677,7 +684,7 @@ export class RPMemory {
                 && !CHAINED_POSSESSIVE.test(text);
             if (!firstParty) overlap *= (1 - SUBJECT_FOCUS);
         }
-        if (overlap && BURST_WEIGHT && burstCounts) {
+        if (overlap && this.burstWeight && burstCounts) {
             overlap *= this._burstFactor(record, burstCounts);
         }
         if (overlap && LENGTH_NORM) {
@@ -698,7 +705,7 @@ export class RPMemory {
             for (const s of this.index.get(token) ?? []) seqs.add(s);
         }
         const pool = [...seqs].map((s) => this.bySeq.get(s)).filter(Boolean);
-        const burstCounts = BURST_WEIGHT ? this._burstCounts() : null;
+        const burstCounts = this.burstWeight ? this._burstCounts() : null;
         const scored = pool.map((k) =>
             [this._score(k, expanded, aboutUser, weights, burstCounts), k]);
         scored.sort((a, b) => b[0][0] - a[0][0] || b[0][1] - a[0][1] || b[0][2] - a[0][2]);
@@ -785,12 +792,14 @@ export class RPMemory {
             observed_chars: this.observed,
             density: this.observed ? stored / this.observed : 0,
             cast: this.cast.size, entities, reserve: this.reserve,
+            burst_weight: this.burstWeight, burst_window_ms: this.burstWindowMs,
         };
     }
 
     serialize() {
         return {
             v: 1, reserve: this.reserve, maxEntries: this.maxEntries,
+            burstWeight: this.burstWeight, burstWindowMs: this.burstWindowMs,
             cast: [...this.cast], names: [...this.names],
             knots: this.knots.map((k) => ({
                 text: k.text, seq: k.seq, hits: k.hits, imp: k.imp,
@@ -803,6 +812,8 @@ export class RPMemory {
         const memory = new RPMemory({
             maxEntries: data.maxEntries ?? 800,
             reserve: data.reserve ?? SCENE_RESERVE,
+            burstWeight: data.burstWeight ?? BURST_WEIGHT,
+            burstWindowMs: data.burstWindowMs ?? BURST_WINDOW_MS,
         });
         for (const name of data.cast ?? []) memory.cast.add(name);
         for (const [n, c] of data.names ?? []) memory.names.set(n, c);

@@ -51,8 +51,8 @@ function setTimes(mem, ...ms) {
     setTimes(before, 0, 1000, 2000, 3000);
     const packBefore = before.scene('gym', 300);
 
-    // BURST_WEIGHT is a module-level const (0 by default) -- this block
-    // only re-confirms the pack is unaffected by the presence of the new
+    // burstWeight defaults to 0 (BURST_WEIGHT) when not passed to the
+    // constructor -- this re-confirms the pack is unaffected by the new
     // _burstCounts()/_burstFactor() machinery when it is not engaged,
     // which parity.mjs's unchanged 24/24 already confirms end to end.
     const after = new RPMemory({ maxEntries: 10 });
@@ -60,6 +60,37 @@ function setTimes(mem, ...ms) {
     setTimes(after, 0, 1000, 2000, 3000);
     check('scene() output identical with the new machinery present',
           after.scene('gym', 300) === packBefore);
+}
+
+// --------------------------------------------- per-instance, not global
+
+{
+    // The whole point of moving burstWeight/burstWindowMs onto the
+    // instance (for the settings-panel slider) rather than leaving them as
+    // module constants: two memories with different settings, built at
+    // the same time, must not see each other's configuration.
+    const off = new RPMemory({ maxEntries: 10, burstWeight: 0 });
+    const on = new RPMemory({ maxEntries: 10, burstWeight: 5, burstWindowMs: 10000 });
+    check('constructor option overrides the module default',
+          off.burstWeight === 0 && on.burstWeight === 5,
+          `off=${off.burstWeight} on=${on.burstWeight}`);
+
+    for (const mem of [off, on]) {
+        for (let i = 0; i < 4; i += 1) mem.observe('Alice', `The gym was busy on day ${i}.`);
+        mem.observe('Alice', 'People call me Marta.');
+        setTimes(mem, 0, 1000, 2000, 3000, 90000000);
+        mem.maxEntries = 4;
+        mem._evict();
+    }
+    check('burstWeight=0 instance evicts the oldest (plain tie-break)',
+          !off.entries().join(' ').includes('day 0'));
+    check('burstWeight=5 instance protects the burst, drops the lone knot',
+          !on.entries().join(' ').includes('Marta'));
+
+    const roundTripped = RPMemory.deserialize(on.serialize());
+    check('burstWeight/burstWindowMs survive a serialize/deserialize round-trip',
+          roundTripped.burstWeight === 5 && roundTripped.burstWindowMs === 10000,
+          `weight=${roundTripped.burstWeight} window=${roundTripped.burstWindowMs}`);
 }
 
 // ------------------------------------------------- reinforced persistence

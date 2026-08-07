@@ -516,20 +516,36 @@ produced obviously wrong ones.
     in a file with no shared code path to the one already fixed. One line
     (`record.reinforced = k.reinforced ?? 0;`).
   - Verified with `extension/parity.mjs` (24/24, unchanged — confirms
-    BURST_WEIGHT=0 is a true no-op end to end, not just in isolation) and
+    burstWeight=0 is a true no-op end to end, not just in isolation) and
     `extension/parity_chat.mjs` (50/50, unaffected — this file wasn't
     touched). No existing test harness here covers RPMemory features with
     no Python counterpart to diff against (burst density, the persistence
     fix), so added `extension/test_burst_and_persistence.mjs` in the same
-    hand-rolled style as `parity.mjs` — 6/6 checks: burst counts correct
-    on a deliberately time-clustered fixture, `scene()` output identical
-    with the new machinery present but inert, and `reinforced` surviving
-    a serialize/deserialize round-trip it previously did not.
-  - Not exposed in the extension's settings UI (`index.js`'s
-    `DEFAULTS`/`settings()`) — `BURST_WEIGHT` stays a module constant you'd
-    edit directly in `qontext.js` to try, same as it is in Python. Adding
-    a settings-panel toggle is a reasonable next step if the mechanism is
-    ever validated, not before.
+    hand-rolled style as `parity.mjs`.
+  - **Follow-up, same session: `BURST_WEIGHT`/`BURST_WINDOW_MS` moved from
+    module constants to per-instance constructor options**
+    (`burstWeight`/`burstWindowMs` on `RPMemory`, defaulting to the module
+    constants), specifically so a settings-panel slider could change one
+    memory's behaviour without a page-wide side effect — the same reason
+    `reserve` was already a constructor option rather than a constant.
+    Threaded through `_burstCounts()`, `_burstFactor()`, `_score()`,
+    `_evict()`, and now round-trips through `serialize()`/`deserialize()`
+    too (`stats()` also reports both, matching how `reserve` already
+    does). `extension/test_burst_and_persistence.mjs` grew four more
+    checks for this specifically (per-instance isolation between two
+    memories built at once, and the new settings surviving a save/load
+    cycle) — 10/10 total. `parity.mjs` (24/24) and `parity_chat.mjs`
+    (50/50) still pass unchanged.
+  - **Now exposed in the settings UI** (`index.js`): two range sliders,
+    "Burst weight" (0–5, step 0.1) and "Burst window" (10–600 seconds,
+    step 10), with a live-updating readout next to each and an explicit
+    `UNVERIFIED, off by default` label so nobody mistakes a slider
+    existing for a slider having been proven to help. Saved into
+    `extension_settings` like every other option here (`DEFAULTS.burstWeight`,
+    `DEFAULTS.burstWindowSec`), and the "Show memory" debug button now
+    prints the five most time-clustered knots when the weight is above 0
+    — the concrete way to actually see the mechanism doing something,
+    since the UI itself has no other visible sign of it.
 
 ## Facts about the environment
 
